@@ -35,6 +35,9 @@ def webhook():
 
         if signal == "PUT":
             tradingsymbol = "NIFTY24JANXXXXPE"
+if not LIVE_TRADING:
+    print("⚠ LIVE TRADING DISABLED - Order NOT placed")
+    return jsonify({"status": "paper_mode", "message": "Live trading disabled"})
 
         order_id = kite.place_order(
             variety=kite.VARIETY_REGULAR,

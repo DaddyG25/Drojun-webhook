@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from kiteconnect import KiteConnect
 import os
 from datetime import datetime
+LIVE_TRADING = os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
 app = Flask(__name__)
 

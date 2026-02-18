@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify
 from kiteconnect import KiteConnect
 import os
 from datetime import datetime
+
+# ===== Live Trading Toggle =====
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
 app = Flask(__name__)
@@ -12,6 +14,7 @@ ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
 
 kite = KiteConnect(api_key=API_KEY)
 kite.set_access_token(ACCESS_TOKEN)
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -28,17 +31,24 @@ def webhook():
     print("Price:", price)
     print("TV Time:", tv_time)
     print("Server Time:", datetime.now())
+    print("LIVE_TRADING:", LIVE_TRADING)
 
     try:
-        # Temporary dummy symbol (we will automate strike next)
+        # Temporary dummy symbol (Strike automation next step)
         tradingsymbol = "NIFTY24JANXXXXCE"
 
         if signal == "PUT":
             tradingsymbol = "NIFTY24JANXXXXPE"
-if not LIVE_TRADING:
-    print("⚠ LIVE TRADING DISABLED - Order NOT placed")
-    return jsonify({"status": "paper_mode", "message": "Live trading disabled"})
 
+        # ===== SAFETY SWITCH =====
+        if not LIVE_TRADING:
+            print("⚠ LIVE TRADING DISABLED - Order NOT placed")
+            return jsonify({
+                "status": "paper_mode",
+                "message": "Live trading disabled"
+            })
+
+        # ===== Place Real Order =====
         order_id = kite.place_order(
             variety=kite.VARIETY_REGULAR,
             exchange=kite.EXCHANGE_NFO,
@@ -49,12 +59,19 @@ if not LIVE_TRADING:
             product=kite.PRODUCT_NRML
         )
 
-        print("Order Placed. ID:", order_id)
-        return jsonify({"status": "order placed", "order_id": order_id})
+        print("✅ Order Placed. ID:", order_id)
+
+        return jsonify({
+            "status": "order placed",
+            "order_id": order_id
+        })
 
     except Exception as e:
-        print("Error placing order:", e)
-        return jsonify({"status": "error", "message": str(e)}), 500
+        print("❌ Error placing order:", e)
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 
 @app.route("/", methods=["GET"])

@@ -6,6 +6,10 @@ from datetime import datetime
 # ===== Live Trading Toggle =====
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
+# ===== Lot Configuration =====
+LOT_SIZE = 65      # Current NIFTY lot size
+LOTS = 1           # Change this number to increase lots
+
 app = Flask(__name__)
 
 # ===== Zerodha API Credentials =====
@@ -32,6 +36,8 @@ def webhook():
     print("TV Time:", tv_time)
     print("Server Time:", datetime.now())
     print("LIVE_TRADING:", LIVE_TRADING)
+    print("Lots:", LOTS)
+    print("Total Quantity:", LOT_SIZE * LOTS)
 
     try:
         # Temporary dummy symbol (Strike automation next step)
@@ -54,7 +60,7 @@ def webhook():
             exchange=kite.EXCHANGE_NFO,
             tradingsymbol=tradingsymbol,
             transaction_type=kite.TRANSACTION_TYPE_BUY,
-            quantity=65,
+            quantity=LOT_SIZE * LOTS,
             order_type=kite.ORDER_TYPE_MARKET,
             product=kite.PRODUCT_NRML
         )

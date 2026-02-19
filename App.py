@@ -5,42 +5,56 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# ===== Environment Variables =====
+# ==============================
+# ENV VARIABLES
+# ==============================
 API_KEY = os.environ.get("API_KEY")
 API_SECRET = os.environ.get("API_SECRET")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
+# ==============================
+# KITE INITIALIZATION
+# ==============================
 kite = KiteConnect(api_key=API_KEY)
 
-# ===== Generate Access Token Route =====
-@app.route("/generate_token")
-def generate_token():
-    request_token = request.args.get("request_token")
-
-    if not request_token:
-        login_url = kite.login_url()
-        return f'<a href="{login_url}">Click here to login to Zerodha</a>'
-
-    try:
-        data = kite.generate_session(request_token, api_secret=API_SECRET)
-        access_token = data["access_token"]
-
-        return f"""
-        ✅ Access Token Generated Successfully <br><br>
-        Copy this token and paste into Railway ACCESS_TOKEN variable:<br><br>
-        <b>{access_token}</b>
-        """
-
-    except Exception as e:
-        return f"Error generating token: {str(e)}"
-
-
-# ===== Webhook Route =====
-@app.route('/webhook', methods=['POST'])
-def webhook():
+if ACCESS_TOKEN:
     kite.set_access_token(ACCESS_TOKEN)
 
+
+# ==============================
+# ROOT ROUTE (TOKEN GENERATION)
+# ==============================
+@app.route("/", methods=["GET"])
+def home():
+    request_token = request.args.get("request_token")
+
+    if request_token:
+        try:
+            data = kite.generate_session(
+                request_token,
+                api_secret=API_SECRET
+            )
+
+            access_token = data["access_token"]
+
+            return f"""
+            ✅ ACCESS TOKEN GENERATED<br><br>
+            Copy this token and paste in Railway variable ACCESS_TOKEN:<br><br>
+            <b>{access_token}</b>
+            """
+
+        except Exception as e:
+            return f"Error generating token: {str(e)}"
+
+    return "DROJUN AUTO LOGIN READY"
+
+
+# ==============================
+# WEBHOOK ROUTE (TRADINGVIEW)
+# ==============================
+@app.route('/webhook', methods=['POST'])
+def webhook():
     data = request.json
 
     signal = data.get("signal")
@@ -57,11 +71,13 @@ def webhook():
     print("LIVE_TRADING:", LIVE_TRADING)
 
     try:
+        # TEMPORARY STRIKE (we automate later)
         tradingsymbol = "NIFTY24JANXXXXCE"
 
         if signal == "PUT":
             tradingsymbol = "NIFTY24JANXXXXPE"
 
+        # ===== SAFETY SWITCH =====
         if not LIVE_TRADING:
             print("⚠ LIVE TRADING DISABLED - Order NOT placed")
             return jsonify({
@@ -69,6 +85,7 @@ def webhook():
                 "message": "Live trading disabled"
             })
 
+        # ===== 1 LOT (65 qty) =====
         order_id = kite.place_order(
             variety=kite.VARIETY_REGULAR,
             exchange=kite.EXCHANGE_NFO,
@@ -94,10 +111,8 @@ def webhook():
         }), 500
 
 
-@app.route("/")
-def home():
-    return "DROJUN AUTO LOGIN READY"
-
-
+# ==============================
+# RUN
+# ==============================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)

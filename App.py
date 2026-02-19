@@ -54,7 +54,7 @@ def webhook():
             exchange=kite.EXCHANGE_NFO,
             tradingsymbol=tradingsymbol,
             transaction_type=kite.TRANSACTION_TYPE_BUY,
-            quantity=75,
+            quantity=65,
             order_type=kite.ORDER_TYPE_MARKET,
             product=kite.PRODUCT_NRML
         )

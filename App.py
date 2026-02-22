@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 from kiteconnect import KiteConnect
 import os
 from datetime import datetime, timedelta
@@ -10,18 +10,49 @@ app = Flask(__name__)
 # ENV
 # =========================
 API_KEY = os.environ.get("API_KEY")
-ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
+API_SECRET = os.environ.get("API_SECRET")
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
 kite = KiteConnect(api_key=API_KEY)
-kite.set_access_token(ACCESS_TOKEN)
+
+ACCESS_TOKEN = None
 
 LOT_SIZE = 65
-RISK_FREE_RATE = 0.06  # 6% annual assumption
+RISK_FREE_RATE = 0.06
 TARGET_DELTA = 0.69
 
 # =========================
-# UTILITIES
+# LOGIN ROUTES
+# =========================
+@app.route("/login")
+def login():
+    return redirect(kite.login_url())
+
+@app.route("/")
+def generate_token():
+    global ACCESS_TOKEN
+
+    request_token = request.args.get("request_token")
+
+    if not request_token:
+        return "DROJUN DELTA ENGINE READY"
+
+    try:
+        data = kite.generate_session(request_token, api_secret=API_SECRET)
+        ACCESS_TOKEN = data["access_token"]
+        kite.set_access_token(ACCESS_TOKEN)
+
+        return """
+        ✅ ACCESS TOKEN GENERATED <br><br>
+        Bot is now LIVE for today.<br><br>
+        You can close this page.
+        """
+
+    except Exception as e:
+        return f"Error generating token: {str(e)}"
+
+# =========================
+# MATH FUNCTIONS
 # =========================
 def norm_cdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
@@ -37,7 +68,7 @@ def bs_delta(S, K, T, r, sigma, option_type):
 
 def get_next_expiry():
     today = datetime.now().date()
-    weekday = today.weekday()  # Monday=0, Thursday=3
+    weekday = today.weekday()
     days_ahead = 3 - weekday
     if days_ahead < 0:
         days_ahead += 7
@@ -53,7 +84,6 @@ def get_time_to_expiry(expiry_date):
     return max(diff.total_seconds() / (365 * 24 * 60 * 60), 0.0001)
 
 def get_atm_iv(spot, expiry):
-    # Use ATM CE price to approximate IV
     strike = round(spot / 50) * 50
     expiry_str = expiry.strftime("%d%b").upper()
     tradingsymbol = f"NIFTY{expiry_str}{strike}CE"
@@ -67,62 +97,48 @@ def get_atm_iv(spot, expiry):
         approx_iv = math.sqrt(2 * math.pi / T) * (time_value / spot)
         return max(approx_iv, 0.1)
     except:
-        return 0.2  # fallback IV
+        return 0.2
 
-# =========================
-# DELTA STRIKE SELECTION
-# =========================
 def select_strike_by_delta(spot, signal):
     expiry = get_next_expiry()
     expiry_str = expiry.strftime("%d%b").upper()
     T = get_time_to_expiry(expiry)
     sigma = get_atm_iv(spot, expiry)
 
-    # Scan strikes ±1000 around ATM
     atm = round(spot / 50) * 50
     strikes = range(atm - 1000, atm + 1000, 50)
-
-    best_symbol = None
-    best_delta = None
 
     for strike in strikes:
         option_type = "CE" if signal == "CALL" else "PE"
         delta = bs_delta(spot, strike, T, RISK_FREE_RATE, sigma, option_type)
 
         if signal == "CALL" and delta >= TARGET_DELTA:
-            best_symbol = f"NIFTY{expiry_str}{strike}CE"
-            best_delta = delta
-            break
+            return f"NIFTY{expiry_str}{strike}CE", delta
 
         if signal == "PUT" and delta <= -TARGET_DELTA:
-            best_symbol = f"NIFTY{expiry_str}{strike}PE"
-            best_delta = delta
-            break
+            return f"NIFTY{expiry_str}{strike}PE", delta
 
-    return best_symbol, best_delta
+    return None, None
 
 # =========================
 # WEBHOOK
 # =========================
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.json
+    global ACCESS_TOKEN
 
+    if not ACCESS_TOKEN:
+        return jsonify({"status": "error", "message": "Login required via /login"}), 401
+
+    data = request.json
     signal = data.get("signal")
     spot = float(data.get("price"))
-
-    print("\n=== DROJUN DELTA EXECUTION ===")
-    print("Signal:", signal)
-    print("Spot:", spot)
-    print("LIVE_TRADING:", LIVE_TRADING)
 
     try:
         tradingsymbol, delta = select_strike_by_delta(spot, signal)
 
         if not tradingsymbol:
             return jsonify({"status": "error", "message": "No suitable strike found"})
-
-        print("Selected:", tradingsymbol, "Delta:", delta)
 
         if not LIVE_TRADING:
             return jsonify({
@@ -151,9 +167,6 @@ def webhook():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/")
-def home():
-    return "DROJUN DELTA ENGINE READY"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)

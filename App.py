@@ -7,7 +7,7 @@ import math
 app = Flask(__name__)
 
 # =========================
-# ENV
+# ENV VARIABLES
 # =========================
 API_KEY = os.environ.get("API_KEY")
 API_SECRET = os.environ.get("API_SECRET")
@@ -15,11 +15,20 @@ LIVE_TRADING = os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
 kite = KiteConnect(api_key=API_KEY)
 
-ACCESS_TOKEN = None
-
 LOT_SIZE = 65
 RISK_FREE_RATE = 0.06
 TARGET_DELTA = 0.69
+
+# =========================
+# LOAD STORED ACCESS TOKEN (IMPORTANT)
+# =========================
+ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
+
+if ACCESS_TOKEN:
+    kite.set_access_token(ACCESS_TOKEN)
+    print("Access token loaded from environment.")
+else:
+    print("No access token found. Login required.")
 
 # =========================
 # LOGIN ROUTES
@@ -30,8 +39,6 @@ def login():
 
 @app.route("/")
 def generate_token():
-    global ACCESS_TOKEN
-
     request_token = request.args.get("request_token")
 
     if not request_token:
@@ -39,8 +46,15 @@ def generate_token():
 
     try:
         data = kite.generate_session(request_token, api_secret=API_SECRET)
-        ACCESS_TOKEN = data["access_token"]
-        kite.set_access_token(ACCESS_TOKEN)
+        access_token = data["access_token"]
+
+        # Set in kite session
+        kite.set_access_token(access_token)
+
+        # Persist in Railway environment
+        os.environ["ACCESS_TOKEN"] = access_token
+
+        print("New access token generated and stored.")
 
         return """
         ✅ ACCESS TOKEN GENERATED <br><br>
@@ -49,10 +63,11 @@ def generate_token():
         """
 
     except Exception as e:
+        print("Token generation error:", str(e))
         return f"Error generating token: {str(e)}"
 
 # =========================
-# MATH FUNCTIONS
+# BLACK SCHOLES FUNCTIONS
 # =========================
 def norm_cdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
@@ -125,16 +140,17 @@ def select_strike_by_delta(spot, signal):
 # =========================
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    global ACCESS_TOKEN
+    print("Webhook received:", request.json)
 
-    if not ACCESS_TOKEN:
+    if not os.environ.get("ACCESS_TOKEN"):
+        print("No access token available.")
         return jsonify({"status": "error", "message": "Login required via /login"}), 401
 
-    data = request.json
-    signal = data.get("signal")
-    spot = float(data.get("price"))
-
     try:
+        data = request.json
+        signal = data.get("signal")
+        spot = float(data.get("price"))
+
         tradingsymbol, delta = select_strike_by_delta(spot, signal)
 
         if not tradingsymbol:
@@ -165,6 +181,7 @@ def webhook():
         })
 
     except Exception as e:
+        print("Webhook error:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 

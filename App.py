@@ -10,7 +10,6 @@ from scipy.stats import norm
 # =========================
 
 API_KEY = os.environ.get("API_KEY")
-API_SECRET = os.environ.get("API_SECRET")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
 
 LOT_SIZE = 65
@@ -28,15 +27,12 @@ if ACCESS_TOKEN:
 else:
     print("No access token found")
 
-
 # =========================
-# EXPIRY CALCULATION
+# EXPIRY
 # =========================
 
 def get_next_expiry():
-
     today = datetime.date.today()
-
     days_ahead = 3 - today.weekday()
 
     if days_ahead <= 0:
@@ -44,104 +40,79 @@ def get_next_expiry():
 
     return today + datetime.timedelta(days_ahead)
 
+# =========================
+# TIME TO EXPIRY
+# =========================
 
 def get_time_to_expiry(expiry):
-
     now = datetime.datetime.now()
+    expiry_datetime = datetime.datetime.combine(expiry, datetime.time(15,30))
+    seconds = (expiry_datetime - now).total_seconds()
 
-    expiry_dt = datetime.datetime.combine(
-        expiry,
-        datetime.time(15,30)
-    )
-
-    diff = expiry_dt - now
-
-    return max(diff.total_seconds()/(365*24*3600),0.0001)
-
+    return max(seconds / (365 * 24 * 60 * 60), 0.00001)
 
 # =========================
 # BLACK SCHOLES DELTA
 # =========================
 
-def bs_delta(S,K,T,r,sigma,option_type):
+def bs_delta(S, K, T, r, sigma, option_type):
 
-    d1 = (
-        math.log(S/K)
-        + (r + sigma**2 / 2)*T
-    )/(sigma*math.sqrt(T))
+    if T <= 0:
+        return 0
+
+    d1 = (math.log(S/K) + (r + 0.5*sigma*sigma)*T) / (sigma * math.sqrt(T))
 
     if option_type == "CE":
         return norm.cdf(d1)
     else:
         return norm.cdf(d1) - 1
 
-
 # =========================
-# IV ESTIMATION
+# ATM IV APPROX
 # =========================
 
 def get_atm_iv(spot, expiry):
 
-    strike = round(spot/50)*50
-
-    year = expiry.strftime("%y")
-    month = str(expiry.month)
-    day = expiry.strftime("%d")
-
-    expiry_str = f"{year}{month}{day}"
-
-    tradingsymbol = f"NIFTY{expiry_str}{strike}CE"
-
     try:
 
-        ltp = kite.ltp([f"NFO:{tradingsymbol}"])
+        strike = round(spot / 50) * 50
+        expiry_str = expiry.strftime("%d%b").upper()
 
+        tradingsymbol = f"NIFTY{expiry_str}{strike}CE"
+
+        ltp = kite.ltp([f"NFO:{tradingsymbol}"])
         option_price = ltp[f"NFO:{tradingsymbol}"]["last_price"]
 
         T = get_time_to_expiry(expiry)
 
-        intrinsic = max(spot - strike,0)
+        intrinsic = max(spot - strike, 0)
+        time_value = max(option_price - intrinsic, 1)
 
-        time_value = max(option_price - intrinsic,1)
+        approx_iv = math.sqrt(2 * math.pi / T) * (time_value / spot)
 
-        approx_iv = math.sqrt(2*math.pi/T)*(time_value/spot)
-
-        return max(approx_iv,0.1)
+        return max(approx_iv, 0.1)
 
     except:
-
         return 0.2
 
-
 # =========================
-# DELTA STRIKE SELECTION
+# STRIKE BY DELTA
 # =========================
 
 def select_strike_by_delta(spot, signal):
 
     expiry = get_next_expiry()
-
-    year = expiry.strftime("%y")
-    month = str(expiry.month)
-    day = expiry.strftime("%d")
-
-    expiry_str = f"{year}{month}{day}"
+    expiry_str = expiry.strftime("%d%b").upper()
 
     T = get_time_to_expiry(expiry)
+    sigma = get_atm_iv(spot, expiry)
 
-    sigma = get_atm_iv(spot,expiry)
-
-    atm = round(spot/50)*50
-
-    strikes = list(range(atm-1000,atm+1000,50))
-
-    best_strike = None
-    best_delta = None
-    best_diff = 999
+    atm = round(spot / 50) * 50
+    strikes = range(atm - 1000, atm + 1000, 50)
 
     for strike in strikes:
 
-        option_type = "CE" if signal=="CALL" else "PE"
+        option_type = "CE" if signal == "CALL" else "PE"
 
         delta = bs_delta(
             spot,
@@ -152,119 +123,73 @@ def select_strike_by_delta(spot, signal):
             option_type
         )
 
-        abs_delta = abs(delta)
+        if signal == "CALL" and delta >= TARGET_DELTA:
+            return f"NIFTY{expiry_str}{strike}CE", delta
 
-        if abs_delta >= TARGET_DELTA:
+        if signal == "PUT" and delta <= -TARGET_DELTA:
+            return f"NIFTY{expiry_str}{strike}PE", delta
 
-            diff = abs(abs_delta - TARGET_DELTA)
-
-            if diff < best_diff:
-
-                best_diff = diff
-                best_strike = strike
-                best_delta = delta
-
-    if not best_strike:
-        return None,None
-
-    if signal=="CALL":
-        symbol = f"NIFTY{expiry_str}{best_strike}CE"
-    else:
-        symbol = f"NIFTY{expiry_str}{best_strike}PE"
-
-    return symbol,best_delta
-
+    return None, None
 
 # =========================
 # WEBHOOK
 # =========================
 
-@app.route("/webhook",methods=["POST"])
+@app.route('/webhook', methods=['POST'])
 def webhook():
 
-    print("Webhook received:",request.json)
-
-    if not ACCESS_TOKEN:
-
-        return jsonify({
-            "status":"error",
-            "message":"Login required"
-        }),401
+    print("Webhook received:", request.json)
 
     try:
 
         data = request.json
-
         signal = data.get("signal")
-
         spot = float(data.get("price"))
 
-        tradingsymbol,delta = select_strike_by_delta(
-            spot,
-            signal
-        )
+        tradingsymbol, delta = select_strike_by_delta(spot, signal)
 
         if not tradingsymbol:
-
             return jsonify({
-                "status":"error",
-                "message":"No strike found"
+                "status": "error",
+                "message": "No strike found"
             })
 
-        print("Selected:",tradingsymbol,"Delta:",delta)
-
         if not LIVE_TRADING:
-
             return jsonify({
-                "status":"paper",
-                "symbol":tradingsymbol,
-                "delta":delta
+                "status": "paper_trade",
+                "symbol": tradingsymbol,
+                "delta": delta
             })
 
         order_id = kite.place_order(
-
             variety=kite.VARIETY_REGULAR,
             exchange=kite.EXCHANGE_NFO,
             tradingsymbol=tradingsymbol,
-
             transaction_type=kite.TRANSACTION_TYPE_BUY,
-
             quantity=LOT_SIZE,
-
             order_type=kite.ORDER_TYPE_MARKET,
-
             product=kite.PRODUCT_NRML
         )
 
         return jsonify({
-
-            "status":"order placed",
-
-            "order_id":order_id,
-
-            "symbol":tradingsymbol,
-
-            "delta":delta
-
+            "status": "order placed",
+            "symbol": tradingsymbol,
+            "delta": delta,
+            "order_id": order_id
         })
 
     except Exception as e:
 
-        print("Webhook error:",str(e))
+        print("Webhook error:", str(e))
 
         return jsonify({
-
-            "status":"error",
-
-            "message":str(e)
-
-        }),500
-
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 # =========================
 # SERVER START
 # =========================
 
-if _name=="main_":
-
-    app.run(host="0.0.0.0",port=8080)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)

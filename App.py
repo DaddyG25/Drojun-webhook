@@ -18,7 +18,7 @@ TARGET_DELTA = 0.69
 RISK_FREE_RATE = 0.05
 LIVE_TRADING = True
 
-app = Flask(_name_)
+app = Flask(__name__)
 
 kite = KiteConnect(api_key=API_KEY)
 

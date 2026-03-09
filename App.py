@@ -11,7 +11,7 @@ API_KEY = os.environ.get("API_KEY")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
 
 LOT_SIZE = 65
-TARGET_DELTA_ITM_STEPS = 3   # ~0.65-0.7 delta
+ITM_STEPS = 3
 LIVE_TRADING = True
 
 app = Flask(__name__)
@@ -23,44 +23,68 @@ if ACCESS_TOKEN:
     print("Access token loaded")
 
 # ======================
-# GET NEAREST THURSDAY
+# GET NIFTY INSTRUMENTS
 # ======================
 
-def get_next_expiry():
+def get_nifty_options():
+
+    instruments = kite.instruments("NFO")
+
+    nifty = []
+
+    for i in instruments:
+
+        if i["name"] == "NIFTY" and i["segment"] == "NFO-OPT":
+
+            nifty.append(i)
+
+    return nifty
+
+# ======================
+# FIND NEAREST EXPIRY
+# ======================
+
+def get_nearest_expiry(instruments):
+
+    expiries = sorted(list(set(i["expiry"] for i in instruments)))
 
     today = datetime.date.today()
 
-    days = (3 - today.weekday()) % 7
+    for exp in expiries:
 
-    expiry = today + datetime.timedelta(days=days)
-
-    return expiry
+        if exp >= today:
+            return exp
 
 # ======================
-# STRIKE SELECTION
+# SELECT STRIKE
 # ======================
 
-def select_strike(spot, signal):
+def select_option(spot, signal):
 
-    expiry = get_next_expiry()
+    instruments = get_nifty_options()
 
-    expiry_str = expiry.strftime("%d%b").upper()
+    expiry = get_nearest_expiry(instruments)
 
-    atm = round(spot / 50) * 50
+    atm = round(spot/50)*50
 
-    step = TARGET_DELTA_ITM_STEPS * 50
+    step = ITM_STEPS * 50
 
     if signal == "CALL":
-
         strike = atm - step
-        symbol = f"NIFTY{expiry_str}{strike}CE"
-
+        opt_type = "CE"
     else:
-
         strike = atm + step
-        symbol = f"NIFTY{expiry_str}{strike}PE"
+        opt_type = "PE"
 
-    return symbol
+    for i in instruments:
+
+        if (
+            i["strike"] == strike
+            and i["expiry"] == expiry
+            and i["instrument_type"] == opt_type
+        ):
+
+            return i["tradingsymbol"]
 
 # ======================
 # WEBHOOK
@@ -80,7 +104,7 @@ def webhook():
 
         spot = float(data["price"])
 
-        symbol = select_strike(spot, signal)
+        symbol = select_option(spot, signal)
 
         print("Selected symbol:", symbol)
 
@@ -100,12 +124,19 @@ def webhook():
         order_id = kite.place_order(
 
             variety=kite.VARIETY_REGULAR,
+
             exchange=kite.EXCHANGE_NFO,
+
             tradingsymbol=symbol,
+
             transaction_type=kite.TRANSACTION_TYPE_BUY,
+
             quantity=LOT_SIZE,
+
             order_type=kite.ORDER_TYPE_LIMIT,
+
             price=limit_price,
+
             product=kite.PRODUCT_NRML
         )
 

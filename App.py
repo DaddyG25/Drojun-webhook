@@ -28,7 +28,7 @@ else:
     print("No access token found")
 
 # ==============================
-# GET NEXT EXPIRY (THURSDAY)
+# GET NEXT EXPIRY
 # ==============================
 
 def get_next_expiry():
@@ -40,9 +40,7 @@ def get_next_expiry():
     if days_ahead <= 0:
         days_ahead += 7
 
-    expiry = today + datetime.timedelta(days=days_ahead)
-
-    return expiry
+    return today + datetime.timedelta(days=days_ahead)
 
 # ==============================
 # TIME TO EXPIRY
@@ -54,23 +52,23 @@ def get_time_to_expiry(expiry):
 
     expiry_datetime = datetime.datetime.combine(
         expiry,
-        datetime.time(15, 30)
+        datetime.time(15,30)
     )
 
     seconds = (expiry_datetime - now).total_seconds()
 
-    return max(seconds / (365 * 24 * 60 * 60), 0.00001)
+    return max(seconds/(365*24*60*60),0.00001)
 
 # ==============================
 # BLACK SCHOLES DELTA
 # ==============================
 
-def bs_delta(S, K, T, r, sigma, option_type):
+def bs_delta(S,K,T,r,sigma,option_type):
 
     if T <= 0:
         return 0
 
-    d1 = (math.log(S/K) + (r + 0.5*sigma*sigma)*T) / (sigma * math.sqrt(T))
+    d1 = (math.log(S/K) + (r + 0.5*sigma*sigma)*T)/(sigma*math.sqrt(T))
 
     if option_type == "CE":
         return norm.cdf(d1)
@@ -78,14 +76,14 @@ def bs_delta(S, K, T, r, sigma, option_type):
         return norm.cdf(d1) - 1
 
 # ==============================
-# ATM IV APPROXIMATION
+# ATM IV APPROX
 # ==============================
 
-def get_atm_iv(spot, expiry):
+def get_atm_iv(spot,expiry):
 
     try:
 
-        strike = round(spot/50) * 50
+        strike = round(spot/50)*50
 
         expiry_str = expiry.strftime("%y%b").upper()
 
@@ -97,13 +95,13 @@ def get_atm_iv(spot, expiry):
 
         T = get_time_to_expiry(expiry)
 
-        intrinsic = max(spot - strike, 0)
+        intrinsic = max(spot-strike,0)
 
-        time_value = max(option_price - intrinsic, 1)
+        time_value = max(option_price-intrinsic,1)
 
-        approx_iv = math.sqrt(2 * math.pi / T) * (time_value / spot)
+        approx_iv = math.sqrt(2*math.pi/T)*(time_value/spot)
 
-        return max(approx_iv, 0.1)
+        return max(approx_iv,0.1)
 
     except:
 
@@ -113,7 +111,7 @@ def get_atm_iv(spot, expiry):
 # SELECT STRIKE BY DELTA
 # ==============================
 
-def select_strike_by_delta(spot, signal):
+def select_strike_by_delta(spot,signal):
 
     expiry = get_next_expiry()
 
@@ -121,11 +119,11 @@ def select_strike_by_delta(spot, signal):
 
     T = get_time_to_expiry(expiry)
 
-    sigma = get_atm_iv(spot, expiry)
+    sigma = get_atm_iv(spot,expiry)
 
-    atm = round(spot/50) * 50
+    atm = round(spot/50)*50
 
-    strikes = range(atm-1000, atm+1000, 50)
+    strikes = range(atm-1000,atm+1000,50)
 
     for strike in strikes:
 
@@ -141,22 +139,22 @@ def select_strike_by_delta(spot, signal):
         )
 
         if signal == "CALL" and delta >= TARGET_DELTA:
-            return f"NIFTY{expiry_str}{strike}CE", delta
+            return f"NIFTY{expiry_str}{strike}CE",delta
 
         if signal == "PUT" and delta <= -TARGET_DELTA:
-            return f"NIFTY{expiry_str}{strike}PE", delta
+            return f"NIFTY{expiry_str}{strike}PE",delta
 
-    return None, None
+    return None,None
 
 # ==============================
 # WEBHOOK
 # ==============================
 
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook",methods=["POST"])
 
 def webhook():
 
-    print("Webhook received:", request.json)
+    print("Webhook received:",request.json)
 
     try:
 
@@ -166,21 +164,34 @@ def webhook():
 
         spot = float(data.get("price"))
 
-        symbol, delta = select_strike_by_delta(spot, signal)
+        symbol,delta = select_strike_by_delta(spot,signal)
 
         if not symbol:
 
             return jsonify({
-                "status": "error",
-                "message": "No strike found"
+                "status":"error",
+                "message":"No strike found"
             })
+
+        # Get option LTP
+        ltp_data = kite.ltp([f"NFO:{symbol}"])
+
+        ltp = ltp_data[f"NFO:{symbol}"]["last_price"]
+
+        # LIMIT PRICE = 5 POINTS BELOW MARKET
+        limit_price = max(ltp - 5,0.5)
+
+        print("Selected symbol:",symbol)
+        print("Option LTP:",ltp)
+        print("Limit order price:",limit_price)
 
         if not LIVE_TRADING:
 
             return jsonify({
-                "status": "paper trade",
-                "symbol": symbol,
-                "delta": delta
+                "status":"paper trade",
+                "symbol":symbol,
+                "delta":delta,
+                "limit_price":limit_price
             })
 
         order_id = kite.place_order(
@@ -195,36 +206,41 @@ def webhook():
 
             quantity=LOT_SIZE,
 
-            order_type=kite.ORDER_TYPE_MARKET,
+            order_type=kite.ORDER_TYPE_LIMIT,
+
+            price=limit_price,
 
             product=kite.PRODUCT_NRML
         )
 
         return jsonify({
 
-            "status": "order placed",
+            "status":"order placed",
 
-            "symbol": symbol,
+            "symbol":symbol,
 
-            "delta": delta,
+            "delta":delta,
 
-            "order_id": order_id
+            "limit_price":limit_price,
+
+            "order_id":order_id
         })
 
     except Exception as e:
 
-        print("Webhook error:", str(e))
+        print("Webhook error:",str(e))
 
         return jsonify({
 
-            "status": "error",
+            "status":"error",
 
-            "message": str(e)
+            "message":str(e)
 
-        }), 500
+        }),500
+
 
 # ==============================
-# START SERVER
+# SERVER START
 # ==============================
 
 if __name__ == "__main__":
@@ -232,4 +248,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=8080
-)
+        )

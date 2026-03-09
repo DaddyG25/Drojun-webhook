@@ -7,7 +7,7 @@ import math
 app = Flask(__name__)
 
 # =========================
-# ENV VARIABLES
+# ENV
 # =========================
 
 API_KEY = os.environ.get("API_KEY")
@@ -16,18 +16,6 @@ LIVE_TRADING = os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
 kite = KiteConnect(api_key=API_KEY)
 
-# =========================
-# CONSTANTS
-# =========================
-
-LOT_SIZE = 65
-TARGET_DELTA = 0.69
-RISK_FREE_RATE = 0.06
-
-# =========================
-# LOAD TOKEN FROM ENV
-# =========================
-
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
 
 if ACCESS_TOKEN:
@@ -35,6 +23,11 @@ if ACCESS_TOKEN:
     print("Access token loaded from environment.")
 else:
     print("No access token found. Login required.")
+
+LOT_SIZE = 65
+RISK_FREE_RATE = 0.06
+TARGET_DELTA = 0.69
+
 
 # =========================
 # LOGIN ROUTES
@@ -48,26 +41,27 @@ def login():
 @app.route("/")
 def generate_token():
 
+    global ACCESS_TOKEN
+
     request_token = request.args.get("request_token")
 
     if not request_token:
         return "DROJUN DELTA ENGINE READY"
 
     try:
+
         data = kite.generate_session(request_token, api_secret=API_SECRET)
 
-        access_token = data["access_token"]
+        ACCESS_TOKEN = data["access_token"]
 
-        kite.set_access_token(access_token)
+        kite.set_access_token(ACCESS_TOKEN)
 
-        print("ACCESS TOKEN GENERATED:", access_token)
+        print("ACCESS TOKEN GENERATED:", ACCESS_TOKEN)
 
-        return f"""
-        <h2>ACCESS TOKEN GENERATED</h2>
-        <p>Copy this token and paste into Railway → Variables → ACCESS_TOKEN</p>
-        <textarea rows="3" cols="80">{access_token}</textarea>
-        <br><br>
-        Bot is now LIVE for today.
+        return """
+        ✅ ACCESS TOKEN GENERATED <br><br>
+        Bot is now LIVE for today.<br><br>
+        Check Railway logs to copy ACCESS TOKEN and paste into variables.
         """
 
     except Exception as e:
@@ -76,7 +70,7 @@ def generate_token():
 
 
 # =========================
-# BLACK SCHOLES FUNCTIONS
+# MATH FUNCTIONS
 # =========================
 
 def norm_cdf(x):
@@ -97,13 +91,12 @@ def bs_delta(S, K, T, r, sigma, option_type):
 
 
 # =========================
-# EXPIRY LOGIC
+# EXPIRY
 # =========================
 
 def get_next_expiry():
 
     today = datetime.now().date()
-
     weekday = today.weekday()
 
     days_ahead = 3 - weekday
@@ -124,7 +117,9 @@ def get_time_to_expiry(expiry_date):
     now = datetime.now()
 
     expiry_datetime = datetime.combine(
-        expiry_date, datetime.min.time()) + timedelta(hours=15, minutes=30)
+        expiry_date,
+        datetime.min.time()
+    ) + timedelta(hours=15, minutes=30)
 
     diff = expiry_datetime - now
 
@@ -132,13 +127,12 @@ def get_time_to_expiry(expiry_date):
 
 
 # =========================
-# IMPLIED VOLATILITY
+# IV ESTIMATION
 # =========================
 
 def get_atm_iv(spot, expiry):
 
     strike = round(spot / 50) * 50
-
     expiry_str = expiry.strftime("%d%b").upper()
 
     tradingsymbol = f"NIFTY{expiry_str}{strike}CE"
@@ -164,7 +158,7 @@ def get_atm_iv(spot, expiry):
 
 
 # =========================
-# DELTA STRIKE SELECTION
+# STRIKE SELECTION
 # =========================
 
 def select_strike_by_delta(spot, signal):
@@ -185,7 +179,14 @@ def select_strike_by_delta(spot, signal):
 
         option_type = "CE" if signal == "CALL" else "PE"
 
-        delta = bs_delta(spot, strike, T, RISK_FREE_RATE, sigma, option_type)
+        delta = bs_delta(
+            spot,
+            strike,
+            T,
+            RISK_FREE_RATE,
+            sigma,
+            option_type
+        )
 
         if signal == "CALL" and delta >= TARGET_DELTA:
             return f"NIFTY{expiry_str}{strike}CE", delta
@@ -208,9 +209,7 @@ def webhook():
     print("Webhook received:", data)
 
     if not ACCESS_TOKEN:
-
         print("No access token available.")
-
         return jsonify({
             "status": "error",
             "message": "Login required via /login"
@@ -225,6 +224,7 @@ def webhook():
         tradingsymbol, delta = select_strike_by_delta(spot, signal)
 
         if not tradingsymbol:
+
             return jsonify({
                 "status": "error",
                 "message": "No suitable strike found"
@@ -243,17 +243,11 @@ def webhook():
         order_id = kite.place_order(
 
             variety=kite.VARIETY_REGULAR,
-
             exchange=kite.EXCHANGE_NFO,
-
             tradingsymbol=tradingsymbol,
-
             transaction_type=kite.TRANSACTION_TYPE_BUY,
-
             quantity=LOT_SIZE,
-
             order_type=kite.ORDER_TYPE_MARKET,
-
             product=kite.PRODUCT_NRML
 
         )

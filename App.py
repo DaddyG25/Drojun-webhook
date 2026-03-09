@@ -169,7 +169,11 @@ def select_strike_by_delta(spot, signal):
 
     expiry = get_next_expiry()
 
-    expiry_str = expiry.strftime("%d%b").upper()
+    year = expiry.strftime("%y")
+month = str(expiry.month)
+day = expiry.strftime("%d")
+
+expiry_str = f"{year}{month}{day}"
 
     T = get_time_to_expiry(expiry)
 

@@ -133,7 +133,11 @@ def get_time_to_expiry(expiry_date):
 def get_atm_iv(spot, expiry):
 
     strike = round(spot / 50) * 50
-    expiry_str = expiry.strftime("%d%b").upper()
+    year = expiry.strftime("%y")
+month = str(expiry.month)
+day = expiry.strftime("%d")
+
+expiry_str = f"{year}{month}{day}"
 
     tradingsymbol = f"NIFTY{expiry_str}{strike}CE"
 

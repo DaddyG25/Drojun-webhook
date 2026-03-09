@@ -5,9 +5,9 @@ from flask import Flask, request, jsonify
 from kiteconnect import KiteConnect
 from scipy.stats import norm
 
-# =========================
+# ==============================
 # CONFIG
-# =========================
+# ==============================
 
 API_KEY = os.environ.get("API_KEY")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
@@ -27,33 +27,43 @@ if ACCESS_TOKEN:
 else:
     print("No access token found")
 
-# =========================
-# EXPIRY
-# =========================
+# ==============================
+# GET NEXT EXPIRY (THURSDAY)
+# ==============================
 
 def get_next_expiry():
+
     today = datetime.date.today()
+
     days_ahead = 3 - today.weekday()
 
     if days_ahead <= 0:
         days_ahead += 7
 
-    return today + datetime.timedelta(days_ahead)
+    expiry = today + datetime.timedelta(days=days_ahead)
 
-# =========================
+    return expiry
+
+# ==============================
 # TIME TO EXPIRY
-# =========================
+# ==============================
 
 def get_time_to_expiry(expiry):
+
     now = datetime.datetime.now()
-    expiry_datetime = datetime.datetime.combine(expiry, datetime.time(15,30))
+
+    expiry_datetime = datetime.datetime.combine(
+        expiry,
+        datetime.time(15, 30)
+    )
+
     seconds = (expiry_datetime - now).total_seconds()
 
     return max(seconds / (365 * 24 * 60 * 60), 0.00001)
 
-# =========================
+# ==============================
 # BLACK SCHOLES DELTA
-# =========================
+# ==============================
 
 def bs_delta(S, K, T, r, sigma, option_type):
 
@@ -67,25 +77,28 @@ def bs_delta(S, K, T, r, sigma, option_type):
     else:
         return norm.cdf(d1) - 1
 
-# =========================
-# ATM IV APPROX
-# =========================
+# ==============================
+# ATM IV APPROXIMATION
+# ==============================
 
 def get_atm_iv(spot, expiry):
 
     try:
 
-        strike = round(spot / 50) * 50
-        expiry_str = expiry.strftime("%d%b").upper()
+        strike = round(spot/50) * 50
 
-        tradingsymbol = f"NIFTY{expiry_str}{strike}CE"
+        expiry_str = expiry.strftime("%y%b").upper()
 
-        ltp = kite.ltp([f"NFO:{tradingsymbol}"])
-        option_price = ltp[f"NFO:{tradingsymbol}"]["last_price"]
+        symbol = f"NIFTY{expiry_str}{strike}CE"
+
+        ltp = kite.ltp([f"NFO:{symbol}"])
+
+        option_price = ltp[f"NFO:{symbol}"]["last_price"]
 
         T = get_time_to_expiry(expiry)
 
         intrinsic = max(spot - strike, 0)
+
         time_value = max(option_price - intrinsic, 1)
 
         approx_iv = math.sqrt(2 * math.pi / T) * (time_value / spot)
@@ -93,22 +106,26 @@ def get_atm_iv(spot, expiry):
         return max(approx_iv, 0.1)
 
     except:
+
         return 0.2
 
-# =========================
-# STRIKE BY DELTA
-# =========================
+# ==============================
+# SELECT STRIKE BY DELTA
+# ==============================
 
 def select_strike_by_delta(spot, signal):
 
     expiry = get_next_expiry()
-    expiry_str = expiry.strftime("%d%b").upper()
+
+    expiry_str = expiry.strftime("%y%b").upper()
 
     T = get_time_to_expiry(expiry)
+
     sigma = get_atm_iv(spot, expiry)
 
-    atm = round(spot / 50) * 50
-    strikes = range(atm - 1000, atm + 1000, 50)
+    atm = round(spot/50) * 50
+
+    strikes = range(atm-1000, atm+1000, 50)
 
     for strike in strikes:
 
@@ -131,11 +148,12 @@ def select_strike_by_delta(spot, signal):
 
     return None, None
 
-# =========================
+# ==============================
 # WEBHOOK
-# =========================
+# ==============================
 
-@app.route('/webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
+
 def webhook():
 
     print("Webhook received:", request.json)
@@ -143,38 +161,53 @@ def webhook():
     try:
 
         data = request.json
+
         signal = data.get("signal")
+
         spot = float(data.get("price"))
 
-        tradingsymbol, delta = select_strike_by_delta(spot, signal)
+        symbol, delta = select_strike_by_delta(spot, signal)
 
-        if not tradingsymbol:
+        if not symbol:
+
             return jsonify({
                 "status": "error",
                 "message": "No strike found"
             })
 
         if not LIVE_TRADING:
+
             return jsonify({
-                "status": "paper_trade",
-                "symbol": tradingsymbol,
+                "status": "paper trade",
+                "symbol": symbol,
                 "delta": delta
             })
 
         order_id = kite.place_order(
+
             variety=kite.VARIETY_REGULAR,
+
             exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=tradingsymbol,
+
+            tradingsymbol=symbol,
+
             transaction_type=kite.TRANSACTION_TYPE_BUY,
+
             quantity=LOT_SIZE,
+
             order_type=kite.ORDER_TYPE_MARKET,
+
             product=kite.PRODUCT_NRML
         )
 
         return jsonify({
+
             "status": "order placed",
-            "symbol": tradingsymbol,
+
+            "symbol": symbol,
+
             "delta": delta,
+
             "order_id": order_id
         })
 
@@ -183,13 +216,20 @@ def webhook():
         print("Webhook error:", str(e))
 
         return jsonify({
+
             "status": "error",
+
             "message": str(e)
+
         }), 500
 
-# =========================
-# SERVER START
-# =========================
+# ==============================
+# START SERVER
+# ==============================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+
+    app.run(
+        host="0.0.0.0",
+        port=8080
+)

@@ -90,7 +90,7 @@ def get_nifty_options():
     return nifty
 
 # ======================
-# FIND NEAREST EXPIRY
+# FIND NEAREST EXPIRY (SKIPS 0DTE)
 # ======================
 
 def get_nearest_expiry(instruments):
@@ -101,7 +101,11 @@ def get_nearest_expiry(instruments):
 
     for exp in expiries:
 
-        if exp >= today:
+        # Skip today's expiry (0DTE protection)
+        if exp == today:
+            continue
+
+        if exp > today:
             return exp
 
 # ======================
@@ -140,7 +144,6 @@ def select_option(spot, signal):
 # ======================
 
 @app.route("/webhook", methods=["POST"])
-
 def webhook():
 
     try:

@@ -24,53 +24,52 @@ if ACCESS_TOKEN:
     print("Access token loaded")
 
 # ======================
+# ROOT ROUTE (handles Zerodha redirect)
+# ======================
+
+@app.route("/")
+def root():
+
+    request_token = request.args.get("request_token")
+
+    if request_token:
+
+        print("Request token:", request_token)
+
+        try:
+
+            session = kite.generate_session(
+                request_token,
+                api_secret=API_SECRET
+            )
+
+            access_token = session["access_token"]
+
+            print("NEW ACCESS TOKEN:", access_token)
+
+            return """
+            <h2>Login Successful</h2>
+            <p>Access token generated.</p>
+            <p>Check Railway logs and copy the token.</p>
+            """
+
+        except Exception as e:
+
+            print("Token error:", str(e))
+            return str(e)
+
+    return "Server running"
+
+# ======================
 # LOGIN ROUTE
 # ======================
 
 @app.route("/login")
-
 def login():
 
     login_url = kite.login_url()
 
     return redirect(login_url)
-
-# ======================
-# TOKEN CALLBACK
-# ======================
-
-@app.route("/callback")
-
-def callback():
-
-    try:
-
-        request_token = request.args.get("request_token")
-
-        print("Request token:", request_token)
-
-        session = kite.generate_session(
-
-            request_token,
-            api_secret=API_SECRET
-
-        )
-
-        access_token = session["access_token"]
-
-        print("NEW ACCESS TOKEN:", access_token)
-
-        return f"""
-        <h2>Login Successful</h2>
-        <p>Access token generated.</p>
-        <p>Check Railway logs and copy the token.</p>
-        """
-
-    except Exception as e:
-
-        print("Token error:", str(e))
-
-        return str(e)
 
 # ======================
 # GET NIFTY INSTRUMENTS
@@ -115,7 +114,7 @@ def select_option(spot, signal):
 
     expiry = get_nearest_expiry(instruments)
 
-    atm = round(spot/50)*50
+    atm = round(spot / 50) * 50
 
     step = ITM_STEPS * 50
 
@@ -174,20 +173,14 @@ def webhook():
         order_id = kite.place_order(
 
             variety=kite.VARIETY_REGULAR,
-
             exchange=kite.EXCHANGE_NFO,
-
             tradingsymbol=symbol,
-
             transaction_type=kite.TRANSACTION_TYPE_BUY,
-
             quantity=LOT_SIZE,
-
             order_type=kite.ORDER_TYPE_LIMIT,
-
             price=limit_price,
-
             product=kite.PRODUCT_NRML
+
         )
 
         return jsonify({

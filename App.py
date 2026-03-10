@@ -1,6 +1,6 @@
 import os
 import datetime
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 from kiteconnect import KiteConnect
 
 # ======================
@@ -8,6 +8,7 @@ from kiteconnect import KiteConnect
 # ======================
 
 API_KEY = os.environ.get("API_KEY")
+API_SECRET = os.environ.get("API_SECRET")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
 
 LOT_SIZE = 65
@@ -21,6 +22,55 @@ kite = KiteConnect(api_key=API_KEY)
 if ACCESS_TOKEN:
     kite.set_access_token(ACCESS_TOKEN)
     print("Access token loaded")
+
+# ======================
+# LOGIN ROUTE
+# ======================
+
+@app.route("/login")
+
+def login():
+
+    login_url = kite.login_url()
+
+    return redirect(login_url)
+
+# ======================
+# TOKEN CALLBACK
+# ======================
+
+@app.route("/callback")
+
+def callback():
+
+    try:
+
+        request_token = request.args.get("request_token")
+
+        print("Request token:", request_token)
+
+        session = kite.generate_session(
+
+            request_token,
+            api_secret=API_SECRET
+
+        )
+
+        access_token = session["access_token"]
+
+        print("NEW ACCESS TOKEN:", access_token)
+
+        return f"""
+        <h2>Login Successful</h2>
+        <p>Access token generated.</p>
+        <p>Check Railway logs and copy the token.</p>
+        """
+
+    except Exception as e:
+
+        print("Token error:", str(e))
+
+        return str(e)
 
 # ======================
 # GET NIFTY INSTRUMENTS

@@ -1,5 +1,6 @@
 import os
 import datetime
+import math
 from flask import Flask, request, jsonify, redirect
 from kiteconnect import KiteConnect
 
@@ -15,6 +16,10 @@ LOT_SIZE = 65
 ITM_STEPS = 3
 LIVE_TRADING = True
 
+TARGET_DELTA = 0.69
+RISK_FREE_RATE = 0.06
+VOLATILITY = 0.18
+
 app = Flask(__name__)
 
 kite = KiteConnect(api_key=API_KEY)
@@ -24,7 +29,31 @@ if ACCESS_TOKEN:
     print("Access token loaded")
 
 # ======================
-# ROOT ROUTE (handles Zerodha redirect)
+# BLACK SCHOLES DELTA
+# ======================
+
+def norm_cdf(x):
+    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
+
+def option_delta(S, K, T, r, sigma, option_type):
+
+    if T <= 0:
+        return 0.5
+
+    d1 = (
+        math.log(S / K)
+        + (r + 0.5 * sigma ** 2) * T
+    ) / (sigma * math.sqrt(T))
+
+    if option_type == "CE":
+        return norm_cdf(d1)
+    else:
+        return norm_cdf(d1) - 1
+
+
+# ======================
+# ROOT ROUTE
 # ======================
 
 @app.route("/")
@@ -60,6 +89,7 @@ def root():
 
     return "Server running"
 
+
 # ======================
 # LOGIN ROUTE
 # ======================
@@ -71,8 +101,9 @@ def login():
 
     return redirect(login_url)
 
+
 # ======================
-# GET NIFTY INSTRUMENTS
+# GET NIFTY OPTIONS
 # ======================
 
 def get_nifty_options():
@@ -89,8 +120,9 @@ def get_nifty_options():
 
     return nifty
 
+
 # ======================
-# FIND NEAREST EXPIRY (SKIPS 0DTE)
+# EXPIRY (SKIP 0DTE)
 # ======================
 
 def get_nearest_expiry(instruments):
@@ -101,15 +133,64 @@ def get_nearest_expiry(instruments):
 
     for exp in expiries:
 
-        # Skip today's expiry (0DTE protection)
         if exp == today:
             continue
 
         if exp > today:
             return exp
 
+
 # ======================
-# SELECT STRIKE
+# DELTA BASED STRIKE
+# ======================
+
+def find_delta_strike(instruments, spot, expiry, signal):
+
+    today = datetime.date.today()
+
+    days = (expiry - today).days
+    T = max(days / 365, 0.01)
+
+    strikes = sorted(list(set(i["strike"] for i in instruments)))
+
+    if signal == "CALL":
+        strikes = [s for s in strikes if s <= spot]
+        strikes = sorted(strikes, reverse=True)
+        opt_type = "CE"
+    else:
+        strikes = [s for s in strikes if s >= spot]
+        strikes = sorted(strikes)
+        opt_type = "PE"
+
+    for strike in strikes[:20]:
+
+        delta = option_delta(
+            spot,
+            strike,
+            T,
+            RISK_FREE_RATE,
+            VOLATILITY,
+            opt_type
+        )
+
+        if signal == "CALL" and delta >= TARGET_DELTA:
+            return strike
+
+        if signal == "PUT" and abs(delta) >= TARGET_DELTA:
+            return strike
+
+    # fallback to ITM method
+    atm = int(spot / 50) * 50
+    step = ITM_STEPS * 50
+
+    if signal == "CALL":
+        return atm - step
+    else:
+        return atm + step
+
+
+# ======================
+# SELECT OPTION
 # ======================
 
 def select_option(spot, signal):
@@ -118,15 +199,16 @@ def select_option(spot, signal):
 
     expiry = get_nearest_expiry(instruments)
 
-    atm = round(spot / 50) * 50
-
-    step = ITM_STEPS * 50
+    strike = find_delta_strike(
+        instruments,
+        spot,
+        expiry,
+        signal
+    )
 
     if signal == "CALL":
-        strike = atm - step
         opt_type = "CE"
     else:
-        strike = atm + step
         opt_type = "PE"
 
     for i in instruments:
@@ -139,11 +221,13 @@ def select_option(spot, signal):
 
             return i["tradingsymbol"]
 
+
 # ======================
 # WEBHOOK
 # ======================
 
 @app.route("/webhook", methods=["POST"])
+
 def webhook():
 
     try:
@@ -199,6 +283,7 @@ def webhook():
         print("Webhook error:", str(e))
 
         return jsonify({"error": str(e)})
+
 
 # ======================
 # SERVER

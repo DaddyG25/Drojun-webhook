@@ -20,7 +20,7 @@ RISK_FREE_RATE = 0.06
 STRIKE_STEP = 50
 MAX_STEPS = 12
 
-app = Flask(_name_)
+app = Flask(__name__)
 
 kite = KiteConnect(api_key=API_KEY)
 
@@ -34,8 +34,8 @@ if ACCESS_TOKEN:
 
 NIFTY_OPTIONS = []
 
-def load_instruments():
 
+def load_instruments():
     global NIFTY_OPTIONS
 
     print("Downloading instruments...")
@@ -59,6 +59,7 @@ load_instruments()
 def norm_cdf(x):
     return (1 + math.erf(x / math.sqrt(2))) / 2
 
+
 # ======================
 # BLACK SCHOLES PRICE
 # ======================
@@ -66,15 +67,16 @@ def norm_cdf(x):
 def bs_price(S, K, T, r, sigma, option_type):
 
     if T <= 0:
-        return max(0, S-K) if option_type == "CE" else max(0, K-S)
+        return max(0, S - K) if option_type == "CE" else max(0, K - S)
 
-    d1 = (math.log(S/K)+(r+0.5*sigma**2)*T)/(sigma*math.sqrt(T))
-    d2 = d1 - sigma*math.sqrt(T)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
 
     if option_type == "CE":
-        return S*norm_cdf(d1)-K*math.exp(-r*T)*norm_cdf(d2)
+        return S * norm_cdf(d1) - K * math.exp(-r * T) * norm_cdf(d2)
     else:
-        return K*math.exp(-r*T)*norm_cdf(-d2)-S*norm_cdf(-d1)
+        return K * math.exp(-r * T) * norm_cdf(-d2) - S * norm_cdf(-d1)
+
 
 # ======================
 # BLACK SCHOLES DELTA
@@ -82,12 +84,13 @@ def bs_price(S, K, T, r, sigma, option_type):
 
 def bs_delta(S, K, T, r, sigma, option_type):
 
-    d1 = (math.log(S/K)+(r+0.5*sigma**2)*T)/(sigma*math.sqrt(T))
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
 
     if option_type == "CE":
         return norm_cdf(d1)
     else:
-        return norm_cdf(d1)-1
+        return norm_cdf(d1) - 1
+
 
 # ======================
 # IMPLIED VOLATILITY
@@ -95,25 +98,26 @@ def bs_delta(S, K, T, r, sigma, option_type):
 
 def implied_volatility(price, S, K, T, r, option_type):
 
-    sigma = 0.3
+    sigma = 0.30
 
     for _ in range(20):
 
         price_est = bs_price(S, K, T, r, sigma, option_type)
 
-        d1 = (math.log(S/K)+(r+0.5*sigma**2)*T)/(sigma*math.sqrt(T))
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
 
-        vega = S * math.sqrt(T) * (1/math.sqrt(2*math.pi)) * math.exp(-0.5*d1*d1)
+        vega = S * math.sqrt(T) * (1 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * d1 * d1)
 
         if vega == 0:
             break
 
-        sigma = sigma - (price_est-price)/vega
+        sigma = sigma - (price_est - price) / vega
 
         if sigma <= 0:
             sigma = 0.01
 
     return sigma
+
 
 # ======================
 # NEXT EXPIRY (NO 0DTE)
@@ -133,6 +137,7 @@ def get_nearest_expiry():
         if exp > today:
             return exp
 
+
 # ======================
 # FIND OPTION SYMBOL
 # ======================
@@ -150,6 +155,7 @@ def get_option_symbol(strike, expiry, opt_type):
 
     return None
 
+
 # ======================
 # STRIKE LADDER SEARCH
 # ======================
@@ -157,7 +163,6 @@ def get_option_symbol(strike, expiry, opt_type):
 def find_delta_strike(spot, expiry, signal):
 
     today = datetime.date.today()
-
     T = max((expiry - today).days / 365, 0.01)
 
     atm = int(spot / STRIKE_STEP) * STRIKE_STEP
@@ -174,7 +179,7 @@ def find_delta_strike(spot, expiry, signal):
 
     strike = atm
 
-    for step in range(MAX_STEPS):
+    for _ in range(MAX_STEPS):
 
         strike += direction
 
@@ -184,7 +189,6 @@ def find_delta_strike(spot, expiry, signal):
             continue
 
         ltp_data = kite.ltp([f"NFO:{symbol}"])
-
         price = ltp_data[f"NFO:{symbol}"]["last_price"]
 
         iv = implied_volatility(price, spot, strike, T, RISK_FREE_RATE, opt_type)
@@ -196,13 +200,13 @@ def find_delta_strike(spot, expiry, signal):
             diff = delta - TARGET_DELTA
 
             if diff < best_diff:
-
                 best_diff = diff
                 best_symbol = symbol
 
             break
 
     return best_symbol
+
 
 # ======================
 # SELECT OPTION
@@ -215,6 +219,7 @@ def select_option(spot, signal):
     symbol = find_delta_strike(spot, expiry, signal)
 
     return symbol
+
 
 # ======================
 # ROOT ROUTE
@@ -247,6 +252,7 @@ def root():
 
     return "Server running"
 
+
 # ======================
 # LOGIN ROUTE
 # ======================
@@ -255,6 +261,7 @@ def root():
 def login():
 
     return redirect(kite.login_url())
+
 
 # ======================
 # WEBHOOK
@@ -270,7 +277,6 @@ def webhook():
         print("Webhook received:", data)
 
         signal = data["signal"]
-
         spot = float(data["price"])
 
         symbol = select_option(spot, signal)
@@ -312,10 +318,3 @@ def webhook():
 
         print("Webhook error:", str(e))
         return jsonify({"error": str(e)})
-
-# ======================
-# SERVER
-# ======================
-
-if _name_ == "_main_":
-    app.run(host="0.0.0.0", port=8080)

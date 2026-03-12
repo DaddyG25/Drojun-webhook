@@ -15,10 +15,10 @@ ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
 LOT_SIZE = 65
 LIVE_TRADING = True
 
-TARGET_DELTA = 0.69
+TARGET_DELTA = 0.70
 RISK_FREE_RATE = 0.06
 STRIKE_STEP = 50
-SCAN_RANGE = 8
+SCAN_RANGE = 10
 
 app = Flask(__name__)
 
@@ -32,7 +32,7 @@ if ACCESS_TOKEN:
 # INSTRUMENT CACHE
 # ======================
 
-NIFTY_OPTIONS = None
+NIFTY_OPTIONS = []
 
 
 def load_instruments():
@@ -51,15 +51,8 @@ def load_instruments():
     print("NIFTY options loaded:", len(NIFTY_OPTIONS))
 
 
-def get_nifty_options():
-
-    global NIFTY_OPTIONS
-
-    if NIFTY_OPTIONS is None:
-        load_instruments()
-
-    return NIFTY_OPTIONS
-
+# preload instruments immediately
+load_instruments()
 
 # ======================
 # NORMAL DISTRIBUTION
@@ -129,12 +122,12 @@ def implied_volatility(price, S, K, T, r, option_type):
 
 
 # ======================
-# EXPIRY (NO 0DTE)
+# FIND NEAREST EXPIRY
 # ======================
 
-def get_nearest_expiry(instruments):
+def get_nearest_expiry():
 
-    expiries = sorted(list(set(i["expiry"] for i in instruments)))
+    expiries = sorted(list(set(i["expiry"] for i in NIFTY_OPTIONS)))
 
     today = datetime.date.today()
 
@@ -151,31 +144,31 @@ def get_nearest_expiry(instruments):
 # FIND DELTA STRIKE
 # ======================
 
-def find_delta_strike(instruments, spot, expiry, signal):
+def find_delta_strike(spot, expiry, signal):
 
     today = datetime.date.today()
 
-    T = max((expiry - today).days/365, 0.01)
+    T = max((expiry - today).days / 365, 0.01)
 
-    atm = int(spot/STRIKE_STEP)*STRIKE_STEP
+    atm = int(spot / STRIKE_STEP) * STRIKE_STEP
 
     if signal == "CALL":
         opt_type = "CE"
-        strikes = [atm-(i*STRIKE_STEP) for i in range(1, SCAN_RANGE)]
+        strikes = [atm - (i * STRIKE_STEP) for i in range(1, SCAN_RANGE)]
     else:
         opt_type = "PE"
-        strikes = [atm+(i*STRIKE_STEP) for i in range(1, SCAN_RANGE)]
+        strikes = [atm + (i * STRIKE_STEP) for i in range(1, SCAN_RANGE)]
 
     symbols = []
     strike_map = {}
 
     for s in strikes:
 
-        for ins in instruments:
+        for ins in NIFTY_OPTIONS:
 
             if ins["strike"] == s and ins["expiry"] == expiry and ins["instrument_type"] == opt_type:
 
-                sym = "NFO:"+ins["tradingsymbol"]
+                sym = "NFO:" + ins["tradingsymbol"]
 
                 symbols.append(sym)
                 strike_map[sym] = s
@@ -185,8 +178,8 @@ def find_delta_strike(instruments, spot, expiry, signal):
 
     ltp_data = kite.ltp(symbols)
 
-    best_symbol = None
-    best_diff = 999
+    selected = None
+    best_delta = 0
 
     for sym in symbols:
 
@@ -198,14 +191,32 @@ def find_delta_strike(instruments, spot, expiry, signal):
 
         delta = abs(bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type))
 
-        diff = abs(delta - TARGET_DELTA)
+        if delta >= TARGET_DELTA and delta > best_delta:
 
-        if diff < best_diff:
+            best_delta = delta
+            selected = sym
 
-            best_diff = diff
-            best_symbol = sym
+    if selected:
+        return selected.split(":")[1]
 
-    return best_symbol.split(":")[1]
+    # fallback: choose highest delta if none >= target
+    best_sym = None
+    best_delta = 0
+
+    for sym in symbols:
+
+        price = ltp_data[sym]["last_price"]
+        strike = strike_map[sym]
+
+        iv = implied_volatility(price, spot, strike, T, RISK_FREE_RATE, opt_type)
+        delta = abs(bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type))
+
+        if delta > best_delta:
+
+            best_delta = delta
+            best_sym = sym
+
+    return best_sym.split(":")[1]
 
 
 # ======================
@@ -214,11 +225,9 @@ def find_delta_strike(instruments, spot, expiry, signal):
 
 def select_option(spot, signal):
 
-    instruments = get_nifty_options()
+    expiry = get_nearest_expiry()
 
-    expiry = get_nearest_expiry(instruments)
-
-    symbol = find_delta_strike(instruments, spot, expiry, signal)
+    symbol = find_delta_strike(spot, expiry, signal)
 
     return symbol
 
@@ -328,11 +337,9 @@ def webhook():
 
 
 # ======================
-# SERVER START
+# SERVER
 # ======================
 
 if __name__ == "__main__":
-
-    load_instruments()
 
     app.run(host="0.0.0.0", port=8080)

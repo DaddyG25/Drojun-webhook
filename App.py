@@ -1,8 +1,7 @@
 import os
 import datetime
 import math
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+import time
 from flask import Flask, request, jsonify, redirect
 from kiteconnect import KiteConnect
 
@@ -25,8 +24,6 @@ MAX_STEPS = 15
 SL_POINTS = 40
 TARGET_POINTS = 80
 
-SPREADSHEET_ID = "1Sv7ir2VaGVbcSqYSQ1JZes6fiINdYfTiMtxQGyLp2Ug"
-
 app = Flask(__name__)
 
 kite = KiteConnect(api_key=API_KEY)
@@ -34,25 +31,6 @@ kite = KiteConnect(api_key=API_KEY)
 if ACCESS_TOKEN:
     kite.set_access_token(ACCESS_TOKEN)
     print("Access token loaded")
-
-# ======================
-# GOOGLE JOURNAL
-# ======================
-
-scope = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive"
-]
-
-creds = ServiceAccountCredentials.from_json_keyfile_name(
-    "service_account.json", scope
-)
-
-client = gspread.authorize(creds)
-
-sheet = client.open_by_key(SPREADSHEET_ID).sheet1
-
-print("Trading journal connected")
 
 # ======================
 # INSTRUMENT CACHE
@@ -75,6 +53,7 @@ def load_instruments():
 
     print("NIFTY options loaded:", len(NIFTY_OPTIONS))
 
+
 load_instruments()
 
 # ======================
@@ -83,6 +62,7 @@ load_instruments()
 
 def norm_cdf(x):
     return (1 + math.erf(x / math.sqrt(2))) / 2
+
 
 # ======================
 # BLACK SCHOLES PRICE
@@ -101,6 +81,7 @@ def bs_price(S, K, T, r, sigma, option_type):
     else:
         return K*math.exp(-r*T)*norm_cdf(-d2)-S*norm_cdf(-d1)
 
+
 # ======================
 # BLACK SCHOLES DELTA
 # ======================
@@ -113,6 +94,7 @@ def bs_delta(S, K, T, r, sigma, option_type):
         return norm_cdf(d1)
     else:
         return norm_cdf(d1)-1
+
 
 # ======================
 # IMPLIED VOLATILITY
@@ -140,8 +122,9 @@ def implied_volatility(price, S, K, T, r, option_type):
 
     return sigma
 
+
 # ======================
-# NEXT EXPIRY
+# NEXT EXPIRY (NO 0DTE)
 # ======================
 
 def get_nearest_expiry():
@@ -157,6 +140,7 @@ def get_nearest_expiry():
 
         if exp > today:
             return exp
+
 
 # ======================
 # FIND OPTION SYMBOL
@@ -175,8 +159,9 @@ def get_option_symbol(strike, expiry, opt_type):
 
     return None
 
+
 # ======================
-# DELTA STRIKE SEARCH
+# STRICT DELTA SEARCH
 # ======================
 
 def find_delta_strike(spot, expiry, signal):
@@ -213,10 +198,10 @@ def find_delta_strike(spot, expiry, signal):
         delta = abs(bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type))
 
         if delta >= TARGET_DELTA:
-
             return symbol
 
     return None
+
 
 # ======================
 # SELECT OPTION
@@ -230,6 +215,7 @@ def select_option(spot, signal):
 
     return symbol
 
+
 # ======================
 # ROOT ROUTE
 # ======================
@@ -241,26 +227,36 @@ def root():
 
     if request_token:
 
-        session = kite.generate_session(
-            request_token,
-            api_secret=API_SECRET
-        )
+        try:
 
-        access_token = session["access_token"]
+            session = kite.generate_session(
+                request_token,
+                api_secret=API_SECRET
+            )
 
-        print("NEW ACCESS TOKEN:", access_token)
+            access_token = session["access_token"]
 
-        return "Login successful"
+            print("NEW ACCESS TOKEN:", access_token)
+
+            return "Login successful"
+
+        except Exception as e:
+
+            print("Token error:", str(e))
+            return str(e)
 
     return "Server running"
 
+
 # ======================
-# LOGIN
+# LOGIN ROUTE
 # ======================
 
 @app.route("/login")
 def login():
+
     return redirect(kite.login_url())
+
 
 # ======================
 # WEBHOOK
@@ -287,16 +283,12 @@ def webhook():
 
         entry_price = max(ltp - 5, 0.5)
 
-        sl_price = entry_price - SL_POINTS
-        target_price = entry_price + TARGET_POINTS
-
-        print("Entry:", entry_price)
-        print("SL:", sl_price)
-        print("Target:", target_price)
+        print("Entry price:", entry_price)
 
         if not LIVE_TRADING:
             return jsonify({"paper_trade": symbol})
 
+        # ENTRY ORDER
         order_id = kite.place_order(
 
             variety=kite.VARIETY_REGULAR,
@@ -310,8 +302,42 @@ def webhook():
 
         )
 
+        print("Entry order placed:", order_id)
+
+        # WAIT FOR FILL
+        filled_price = None
+
+        for _ in range(10):
+
+            time.sleep(1)
+
+            orders = kite.orders()
+
+            for o in orders:
+
+                if o["order_id"] == order_id and o["status"] == "COMPLETE":
+
+                    filled_price = o["average_price"]
+                    break
+
+            if filled_price:
+                break
+
+        if not filled_price:
+
+            return jsonify({"status": "entry not filled yet"})
+
+        print("Entry filled:", filled_price)
+
+        sl_price = filled_price - SL_POINTS
+        target_price = filled_price + TARGET_POINTS
+
+        print("SL:", sl_price)
+        print("Target:", target_price)
+
         # STOP LOSS
         kite.place_order(
+
             variety=kite.VARIETY_REGULAR,
             exchange=kite.EXCHANGE_NFO,
             tradingsymbol=symbol,
@@ -321,10 +347,12 @@ def webhook():
             price=sl_price,
             trigger_price=sl_price,
             product=kite.PRODUCT_NRML
+
         )
 
         # TARGET
         kite.place_order(
+
             variety=kite.VARIETY_REGULAR,
             exchange=kite.EXCHANGE_NFO,
             tradingsymbol=symbol,
@@ -333,22 +361,13 @@ def webhook():
             order_type=kite.ORDER_TYPE_LIMIT,
             price=target_price,
             product=kite.PRODUCT_NRML
+
         )
 
-        # JOURNAL ENTRY
-        sheet.append_row([
-            datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            signal,
-            symbol,
-            entry_price,
-            sl_price,
-            target_price
-        ])
-
         return jsonify({
-            "status": "order placed",
+            "status": "trade active",
             "symbol": symbol,
-            "entry": entry_price,
+            "entry": filled_price,
             "sl": sl_price,
             "target": target_price
         })

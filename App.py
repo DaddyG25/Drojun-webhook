@@ -18,9 +18,9 @@ LIVE_TRADING = True
 TARGET_DELTA = 0.70
 RISK_FREE_RATE = 0.06
 STRIKE_STEP = 50
-SCAN_RANGE = 10
+MAX_STEPS = 12
 
-app = Flask(__name__)
+app = Flask(_name_)
 
 kite = KiteConnect(api_key=API_KEY)
 
@@ -33,7 +33,6 @@ if ACCESS_TOKEN:
 # ======================
 
 NIFTY_OPTIONS = []
-
 
 def load_instruments():
 
@@ -51,7 +50,6 @@ def load_instruments():
     print("NIFTY options loaded:", len(NIFTY_OPTIONS))
 
 
-# preload instruments immediately
 load_instruments()
 
 # ======================
@@ -60,7 +58,6 @@ load_instruments()
 
 def norm_cdf(x):
     return (1 + math.erf(x / math.sqrt(2))) / 2
-
 
 # ======================
 # BLACK SCHOLES PRICE
@@ -79,7 +76,6 @@ def bs_price(S, K, T, r, sigma, option_type):
     else:
         return K*math.exp(-r*T)*norm_cdf(-d2)-S*norm_cdf(-d1)
 
-
 # ======================
 # BLACK SCHOLES DELTA
 # ======================
@@ -92,7 +88,6 @@ def bs_delta(S, K, T, r, sigma, option_type):
         return norm_cdf(d1)
     else:
         return norm_cdf(d1)-1
-
 
 # ======================
 # IMPLIED VOLATILITY
@@ -120,9 +115,8 @@ def implied_volatility(price, S, K, T, r, option_type):
 
     return sigma
 
-
 # ======================
-# FIND NEAREST EXPIRY
+# NEXT EXPIRY (NO 0DTE)
 # ======================
 
 def get_nearest_expiry():
@@ -139,9 +133,25 @@ def get_nearest_expiry():
         if exp > today:
             return exp
 
+# ======================
+# FIND OPTION SYMBOL
+# ======================
+
+def get_option_symbol(strike, expiry, opt_type):
+
+    for ins in NIFTY_OPTIONS:
+
+        if (
+            ins["strike"] == strike
+            and ins["expiry"] == expiry
+            and ins["instrument_type"] == opt_type
+        ):
+            return ins["tradingsymbol"]
+
+    return None
 
 # ======================
-# FIND DELTA STRIKE
+# STRIKE LADDER SEARCH
 # ======================
 
 def find_delta_strike(spot, expiry, signal):
@@ -154,70 +164,45 @@ def find_delta_strike(spot, expiry, signal):
 
     if signal == "CALL":
         opt_type = "CE"
-        strikes = [atm - (i * STRIKE_STEP) for i in range(1, SCAN_RANGE)]
+        direction = -STRIKE_STEP
     else:
         opt_type = "PE"
-        strikes = [atm + (i * STRIKE_STEP) for i in range(1, SCAN_RANGE)]
+        direction = STRIKE_STEP
 
-    symbols = []
-    strike_map = {}
+    best_symbol = None
+    best_diff = 999
 
-    for s in strikes:
+    strike = atm
 
-        for ins in NIFTY_OPTIONS:
+    for step in range(MAX_STEPS):
 
-            if ins["strike"] == s and ins["expiry"] == expiry and ins["instrument_type"] == opt_type:
+        strike += direction
 
-                sym = "NFO:" + ins["tradingsymbol"]
+        symbol = get_option_symbol(strike, expiry, opt_type)
 
-                symbols.append(sym)
-                strike_map[sym] = s
+        if not symbol:
+            continue
 
-    if not symbols:
-        return None
+        ltp_data = kite.ltp([f"NFO:{symbol}"])
 
-    ltp_data = kite.ltp(symbols)
-
-    selected = None
-    best_delta = 0
-
-    for sym in symbols:
-
-        price = ltp_data[sym]["last_price"]
-
-        strike = strike_map[sym]
+        price = ltp_data[f"NFO:{symbol}"]["last_price"]
 
         iv = implied_volatility(price, spot, strike, T, RISK_FREE_RATE, opt_type)
 
         delta = abs(bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type))
 
-        if delta >= TARGET_DELTA and delta > best_delta:
+        if delta >= TARGET_DELTA:
 
-            best_delta = delta
-            selected = sym
+            diff = delta - TARGET_DELTA
 
-    if selected:
-        return selected.split(":")[1]
+            if diff < best_diff:
 
-    # fallback: choose highest delta if none >= target
-    best_sym = None
-    best_delta = 0
+                best_diff = diff
+                best_symbol = symbol
 
-    for sym in symbols:
+            break
 
-        price = ltp_data[sym]["last_price"]
-        strike = strike_map[sym]
-
-        iv = implied_volatility(price, spot, strike, T, RISK_FREE_RATE, opt_type)
-        delta = abs(bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type))
-
-        if delta > best_delta:
-
-            best_delta = delta
-            best_sym = sym
-
-    return best_sym.split(":")[1]
-
+    return best_symbol
 
 # ======================
 # SELECT OPTION
@@ -230,7 +215,6 @@ def select_option(spot, signal):
     symbol = find_delta_strike(spot, expiry, signal)
 
     return symbol
-
 
 # ======================
 # ROOT ROUTE
@@ -263,16 +247,14 @@ def root():
 
     return "Server running"
 
-
 # ======================
-# LOGIN
+# LOGIN ROUTE
 # ======================
 
 @app.route("/login")
 def login():
 
     return redirect(kite.login_url())
-
 
 # ======================
 # WEBHOOK
@@ -305,7 +287,6 @@ def webhook():
         print("Limit order:", limit_price)
 
         if not LIVE_TRADING:
-
             return jsonify({"paper_trade": symbol})
 
         order_id = kite.place_order(
@@ -322,24 +303,19 @@ def webhook():
         )
 
         return jsonify({
-
             "status": "order placed",
             "symbol": symbol,
             "order_id": order_id
-
         })
 
     except Exception as e:
 
         print("Webhook error:", str(e))
-
         return jsonify({"error": str(e)})
-
 
 # ======================
 # SERVER
 # ======================
 
-if __name__ == "__main__":
-
+if _name_ == "_main_":
     app.run(host="0.0.0.0", port=8080)

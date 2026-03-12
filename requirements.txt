@@ -2,3 +2,5 @@ flask
 gunicorn
 kiteconnect
 scipy
+gspread
+oauth2client

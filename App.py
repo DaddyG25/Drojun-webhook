@@ -18,7 +18,7 @@ LIVE_TRADING = True
 TARGET_DELTA = 0.70
 RISK_FREE_RATE = 0.06
 STRIKE_STEP = 50
-MAX_STEPS = 12
+MAX_STEPS = 15
 
 app = Flask(__name__)
 
@@ -34,8 +34,8 @@ if ACCESS_TOKEN:
 
 NIFTY_OPTIONS = []
 
-
 def load_instruments():
+
     global NIFTY_OPTIONS
 
     print("Downloading instruments...")
@@ -67,15 +67,15 @@ def norm_cdf(x):
 def bs_price(S, K, T, r, sigma, option_type):
 
     if T <= 0:
-        return max(0, S - K) if option_type == "CE" else max(0, K - S)
+        return max(0, S-K) if option_type == "CE" else max(0, K-S)
 
-    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-    d2 = d1 - sigma * math.sqrt(T)
+    d1 = (math.log(S/K)+(r+0.5*sigma**2)*T)/(sigma*math.sqrt(T))
+    d2 = d1 - sigma*math.sqrt(T)
 
     if option_type == "CE":
-        return S * norm_cdf(d1) - K * math.exp(-r * T) * norm_cdf(d2)
+        return S*norm_cdf(d1)-K*math.exp(-r*T)*norm_cdf(d2)
     else:
-        return K * math.exp(-r * T) * norm_cdf(-d2) - S * norm_cdf(-d1)
+        return K*math.exp(-r*T)*norm_cdf(-d2)-S*norm_cdf(-d1)
 
 
 # ======================
@@ -84,12 +84,12 @@ def bs_price(S, K, T, r, sigma, option_type):
 
 def bs_delta(S, K, T, r, sigma, option_type):
 
-    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d1 = (math.log(S/K)+(r+0.5*sigma**2)*T)/(sigma*math.sqrt(T))
 
     if option_type == "CE":
         return norm_cdf(d1)
     else:
-        return norm_cdf(d1) - 1
+        return norm_cdf(d1)-1
 
 
 # ======================
@@ -104,14 +104,14 @@ def implied_volatility(price, S, K, T, r, option_type):
 
         price_est = bs_price(S, K, T, r, sigma, option_type)
 
-        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+        d1 = (math.log(S/K)+(r+0.5*sigma**2)*T)/(sigma*math.sqrt(T))
 
-        vega = S * math.sqrt(T) * (1 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * d1 * d1)
+        vega = S * math.sqrt(T) * (1/math.sqrt(2*math.pi)) * math.exp(-0.5*d1*d1)
 
         if vega == 0:
             break
 
-        sigma = sigma - (price_est - price) / vega
+        sigma = sigma - (price_est-price)/vega
 
         if sigma <= 0:
             sigma = 0.01
@@ -157,7 +157,7 @@ def get_option_symbol(strike, expiry, opt_type):
 
 
 # ======================
-# STRIKE LADDER SEARCH
+# STRICT DELTA SEARCH
 # ======================
 
 def find_delta_strike(spot, expiry, signal):
@@ -174,9 +174,6 @@ def find_delta_strike(spot, expiry, signal):
         opt_type = "PE"
         direction = STRIKE_STEP
 
-    best_symbol = None
-    best_diff = 999
-
     strike = atm
 
     for _ in range(MAX_STEPS):
@@ -189,23 +186,19 @@ def find_delta_strike(spot, expiry, signal):
             continue
 
         ltp_data = kite.ltp([f"NFO:{symbol}"])
+
         price = ltp_data[f"NFO:{symbol}"]["last_price"]
 
         iv = implied_volatility(price, spot, strike, T, RISK_FREE_RATE, opt_type)
 
         delta = abs(bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type))
 
+        # STRICT RULE
         if delta >= TARGET_DELTA:
 
-            diff = delta - TARGET_DELTA
+            return symbol
 
-            if diff < best_diff:
-                best_diff = diff
-                best_symbol = symbol
-
-            break
-
-    return best_symbol
+    return None
 
 
 # ======================
@@ -277,6 +270,7 @@ def webhook():
         print("Webhook received:", data)
 
         signal = data["signal"]
+
         spot = float(data["price"])
 
         symbol = select_option(spot, signal)
@@ -317,4 +311,5 @@ def webhook():
     except Exception as e:
 
         print("Webhook error:", str(e))
+
         return jsonify({"error": str(e)})

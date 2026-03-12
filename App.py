@@ -1,9 +1,13 @@
 import os
-import datetime
+import json
 import math
 import time
+import datetime
 from flask import Flask, request, jsonify
 from kiteconnect import KiteConnect
+
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # ======================
 # CONFIG
@@ -26,32 +30,61 @@ LIVE_TRADING = True
 app = Flask(__name__)
 
 kite = KiteConnect(api_key=API_KEY)
-
 kite.set_access_token(ACCESS_TOKEN)
+
+# ======================
+# GOOGLE SHEETS CONNECT
+# ======================
+
+GOOGLE_CREDS = os.environ.get("GOOGLE_CREDS")
+
+creds_dict = json.loads(GOOGLE_CREDS)
+
+scope = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive"
+]
+
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+
+client = gspread.authorize(creds)
+
+sheet = client.open("Algo Trading Journal").sheet1
+
+# ======================
+# LOG TRADE
+# ======================
+
+def log_trade(symbol, signal, entry, sl, target):
+
+    now = datetime.datetime.now()
+
+    sheet.append_row([
+        str(now.date()),
+        now.strftime("%H:%M:%S"),
+        symbol,
+        signal,
+        entry,
+        sl,
+        target,
+        LOT_SIZE,
+        "OPEN"
+    ])
 
 # ======================
 # INSTRUMENT CACHE
 # ======================
 
-NIFTY_OPTIONS = []
+print("Downloading instruments...")
 
-def load_instruments():
+instruments = kite.instruments("NFO")
 
-    global NIFTY_OPTIONS
+NIFTY_OPTIONS = [
+    i for i in instruments
+    if i["name"] == "NIFTY" and i["segment"] == "NFO-OPT"
+]
 
-    print("Downloading instruments...")
-
-    instruments = kite.instruments("NFO")
-
-    NIFTY_OPTIONS = [
-        i for i in instruments
-        if i["name"] == "NIFTY" and i["segment"] == "NFO-OPT"
-    ]
-
-    print("Loaded:", len(NIFTY_OPTIONS))
-
-
-load_instruments()
+print("Loaded instruments:", len(NIFTY_OPTIONS))
 
 # ======================
 # NORMAL CDF
@@ -60,9 +93,8 @@ load_instruments()
 def norm_cdf(x):
     return (1 + math.erf(x / math.sqrt(2))) / 2
 
-
 # ======================
-# DELTA
+# DELTA CALCULATION
 # ======================
 
 def bs_delta(S, K, T, r, sigma, option_type):
@@ -74,9 +106,8 @@ def bs_delta(S, K, T, r, sigma, option_type):
     else:
         return norm_cdf(d1)-1
 
-
 # ======================
-# EXPIRY
+# FIND EXPIRY
 # ======================
 
 def get_nearest_expiry():
@@ -92,7 +123,6 @@ def get_nearest_expiry():
 
         if exp > today:
             return exp
-
 
 # ======================
 # FIND OPTION SYMBOL
@@ -111,9 +141,8 @@ def get_option_symbol(strike, expiry, opt_type):
 
     return None
 
-
 # ======================
-# DELTA STRIKE SEARCH
+# STRIKE SEARCH
 # ======================
 
 def find_delta_strike(spot, expiry, signal):
@@ -140,13 +169,12 @@ def find_delta_strike(spot, expiry, signal):
 
         ltp = kite.ltp([f"NFO:{symbol}"])[f"NFO:{symbol}"]["last_price"]
 
-        delta = 0.7  # simplified assumption
+        delta = 0.7
 
         if delta >= TARGET_DELTA:
             return symbol
 
     return None
-
 
 # ======================
 # OCO MONITOR
@@ -193,7 +221,6 @@ def monitor_exit(target_order, sl_order):
 
         time.sleep(2)
 
-
 # ======================
 # WEBHOOK
 # ======================
@@ -216,58 +243,10 @@ def webhook():
 
         entry = round(ltp - 5, 1)
 
-        # ENTRY
+        if not LIVE_TRADING:
+            return jsonify({"paper_trade": symbol})
+
+        # ENTRY ORDER
         entry_id = kite.place_order(
 
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=symbol,
-            transaction_type="BUY",
-            quantity=LOT_SIZE,
-            order_type="LIMIT",
-            price=entry,
-            product="NRML"
-
-        )
-
-        time.sleep(2)
-
-        target = entry + TARGET_POINTS
-        sl = entry - STOP_LOSS_POINTS
-
-        # TARGET
-        target_id = kite.place_order(
-
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=symbol,
-            transaction_type="SELL",
-            quantity=LOT_SIZE,
-            order_type="LIMIT",
-            price=target,
-            product="NRML"
-
-        )
-
-        # STOPLOSS
-        sl_id = kite.place_order(
-
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=symbol,
-            transaction_type="SELL",
-            quantity=LOT_SIZE,
-            order_type="SL",
-            trigger_price=sl,
-            price=sl-1,
-            product="NRML"
-
-        )
-
-        monitor_exit(target_id, sl_id)
-
-        return jsonify({"status": "trade placed"})
-
-    except Exception as e:
-
-        return jsonify({"error": str(e)})
+            variety=kite.VARI

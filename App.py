@@ -161,7 +161,7 @@ def get_option_symbol(strike, expiry, opt_type):
 
 
 # ======================
-# STRICT DELTA SEARCH (WITH LOGS)
+# STRICT DELTA SEARCH (WITH RETRY)
 # ======================
 
 def find_delta_strike(spot, expiry, signal):
@@ -193,8 +193,21 @@ def find_delta_strike(spot, expiry, signal):
         if not symbol:
             continue
 
-        ltp_data = kite.ltp([f"NFO:{symbol}"])
-        price = ltp_data[f"NFO:{symbol}"]["last_price"]
+        # 🔥 RETRY LOGIC ADDED
+        price = None
+
+        for attempt in range(3):
+            try:
+                ltp_data = kite.ltp([f"NFO:{symbol}"])
+                price = ltp_data[f"NFO:{symbol}"]["last_price"]
+                break
+            except Exception as e:
+                print(f"Retry {attempt+1} failed for {symbol}: {e}")
+                time.sleep(1)
+
+        if price is None:
+            print("Skipping strike due to API failure:", strike)
+            continue
 
         iv = implied_volatility(price, spot, strike, T, RISK_FREE_RATE, opt_type)
         delta = abs(bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type))
@@ -267,7 +280,7 @@ def login():
 
 
 # ======================
-# WEBHOOK (WITH LOGS)
+# WEBHOOK (UNCHANGED)
 # ======================
 
 @app.route("/webhook", methods=["POST"])
@@ -299,7 +312,6 @@ def webhook():
             return jsonify({"paper_trade": symbol})
 
         order_id = kite.place_order(
-
             variety=kite.VARIETY_REGULAR,
             exchange=kite.EXCHANGE_NFO,
             tradingsymbol=symbol,
@@ -308,7 +320,6 @@ def webhook():
             order_type=kite.ORDER_TYPE_LIMIT,
             price=entry_price,
             product=kite.PRODUCT_NRML
-
         )
 
         print("Entry order placed:", order_id)
@@ -342,7 +353,6 @@ def webhook():
         print("SL:", sl_price)
         print("Target:", target_price)
 
-        # STOP LOSS
         kite.place_order(
             variety=kite.VARIETY_REGULAR,
             exchange=kite.EXCHANGE_NFO,
@@ -355,7 +365,6 @@ def webhook():
             product=kite.PRODUCT_NRML
         )
 
-        # TARGET
         kite.place_order(
             variety=kite.VARIETY_REGULAR,
             exchange=kite.EXCHANGE_NFO,

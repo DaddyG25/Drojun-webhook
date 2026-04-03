@@ -217,7 +217,7 @@ def root():
     request_token = request.args.get("request_token")
 
     if request_token:
-    try:
+     try:
         kite_local = KiteConnect(api_key=API_KEY)
 
         session = kite_local.generate_session(

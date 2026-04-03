@@ -214,33 +214,30 @@ def select_option(spot, signal):
 
 @app.route("/")
 def root():
-
     request_token = request.args.get("request_token")
 
     if request_token:
-
         try:
-            kite_local = KiteConnect(api_key=API_KEY)
-
-            session = kite_local.generate_session(
+            session = kite.generate_session(
                 request_token,
                 api_secret=API_SECRET
             )
 
             access_token = session["access_token"]
 
-            kite.set_access_token(access_token)
-
             print("NEW ACCESS TOKEN:", access_token)
 
-            return "Login successful"
+            VPS_URL = "http://168.144.78.119:8000/save_token"
+
+            import requests
+            requests.post(VPS_URL, json={"access_token": access_token})
+
+            return "Login successful (forwarded to VPS)"
 
         except Exception as e:
-            print("Token error:", str(e))
             return str(e)
 
     return "Server running"
-
 
 # ======================
 # LOGIN ROUTE

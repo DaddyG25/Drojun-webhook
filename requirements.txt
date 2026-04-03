@@ -4,3 +4,4 @@ kiteconnect
 scipy
 gspread
 oauth2client
+requests

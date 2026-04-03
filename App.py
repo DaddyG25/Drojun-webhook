@@ -40,7 +40,6 @@ if ACCESS_TOKEN:
 NIFTY_OPTIONS = []
 
 def load_instruments():
-
     global NIFTY_OPTIONS
 
     print("Downloading instruments...")
@@ -70,7 +69,6 @@ def norm_cdf(x):
 # ======================
 
 def bs_price(S, K, T, r, sigma, option_type):
-
     if T <= 0:
         return max(0, S-K) if option_type == "CE" else max(0, K-S)
 
@@ -88,7 +86,6 @@ def bs_price(S, K, T, r, sigma, option_type):
 # ======================
 
 def bs_delta(S, K, T, r, sigma, option_type):
-
     d1 = (math.log(S/K)+(r+0.5*sigma**2)*T)/(sigma*math.sqrt(T))
 
     if option_type == "CE":
@@ -102,11 +99,9 @@ def bs_delta(S, K, T, r, sigma, option_type):
 # ======================
 
 def implied_volatility(price, S, K, T, r, option_type):
-
     sigma = 0.30
 
     for _ in range(20):
-
         price_est = bs_price(S, K, T, r, sigma, option_type)
 
         d1 = (math.log(S/K)+(r+0.5*sigma**2)*T)/(sigma*math.sqrt(T))
@@ -129,16 +124,12 @@ def implied_volatility(price, S, K, T, r, option_type):
 # ======================
 
 def get_nearest_expiry():
-
     expiries = sorted(list(set(i["expiry"] for i in NIFTY_OPTIONS)))
-
     today = datetime.date.today()
 
     for exp in expiries:
-
         if exp == today:
             continue
-
         if exp > today:
             return exp
 
@@ -148,9 +139,7 @@ def get_nearest_expiry():
 # ======================
 
 def get_option_symbol(strike, expiry, opt_type):
-
     for ins in NIFTY_OPTIONS:
-
         if (
             ins["strike"] == strike
             and ins["expiry"] == expiry
@@ -166,7 +155,6 @@ def get_option_symbol(strike, expiry, opt_type):
 # ======================
 
 def find_delta_strike(spot, expiry, signal):
-
     today = datetime.date.today()
     T = max((expiry - today).days / 365, 0.01)
 
@@ -182,7 +170,6 @@ def find_delta_strike(spot, expiry, signal):
     strike = atm
 
     for _ in range(MAX_STEPS):
-
         strike += direction
 
         symbol = get_option_symbol(strike, expiry, opt_type)
@@ -203,7 +190,6 @@ def find_delta_strike(spot, expiry, signal):
 
 
 def select_option(spot, signal):
-
     expiry = get_nearest_expiry()
     return find_delta_strike(spot, expiry, signal)
 
@@ -217,29 +203,29 @@ def root():
     request_token = request.args.get("request_token")
 
     if request_token:
-     try:
-        kite_local = KiteConnect(api_key=API_KEY)
+        try:
+            kite_local = KiteConnect(api_key=API_KEY)
 
-        session = kite_local.generate_session(
-            request_token,
-            api_secret=API_SECRET
-        )
+            session = kite_local.generate_session(
+                request_token,
+                api_secret=API_SECRET
+            )
 
-        access_token = session["access_token"]
+            access_token = session["access_token"]
 
-        print("NEW ACCESS TOKEN:", access_token)
+            print("NEW ACCESS TOKEN:", access_token)
 
-        VPS_URL = "http://168.144.78.119:8000/save_token"
+            VPS_URL = "http://168.144.78.119:8000/save_token"
 
-        import requests
-        requests.post(VPS_URL, json={"access_token": access_token})
+            requests.post(VPS_URL, json={"access_token": access_token})
 
-        return "Login successful (forwarded to VPS)"
+            return "Login successful (forwarded to VPS)"
 
-    except Exception as e:
-        return str(e)
+        except Exception as e:
+            return str(e)
 
     return "Server running"
+
 
 # ======================
 # LOGIN ROUTE
@@ -251,10 +237,8 @@ def login():
 
 
 # ======================
-# WEBHOOK (UNCHANGED)
+# WEBHOOK
 # ======================
-
-import requests
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -274,3 +258,30 @@ def webhook():
     except Exception as e:
         print("Forward error:", str(e))
         return jsonify({"error": str(e)})
+
+
+# ======================
+# SAVE TOKEN (VPS SIDE)
+# ======================
+
+@app.route("/save_token", methods=["POST"])
+def save_token():
+    data = request.json
+    token = data.get("access_token")
+
+    with open("access_token.txt", "w") as f:
+        f.write(token)
+
+    kite.set_access_token(token)
+
+    print("TOKEN RECEIVED FROM RAILWAY:", token)
+
+    return jsonify({"status": "token_saved"})
+
+
+# ======================
+# RUN
+# ======================
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000)

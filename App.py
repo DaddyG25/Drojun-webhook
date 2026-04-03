@@ -218,22 +218,23 @@ def root():
 
     if request_token:
         try:
-            session = kite.generate_session(
-                request_token,
-                api_secret=API_SECRET
-            )
+    kite_local = KiteConnect(api_key=API_KEY)
 
-            access_token = session["access_token"]
+    session = kite_local.generate_session(
+        request_token,
+        api_secret=API_SECRET
+    )
 
-            print("NEW ACCESS TOKEN:", access_token)
+    access_token = session["access_token"]
 
-            VPS_URL = "http://168.144.78.119:8000/save_token"
+    print("NEW ACCESS TOKEN:", access_token)
 
-            import requests
-            requests.post(VPS_URL, json={"access_token": access_token})
+    VPS_URL = "http://168.144.78.119:8000/save_token"
 
-            return "Login successful (forwarded to VPS)"
+    import requests
+    requests.post(VPS_URL, json={"access_token": access_token})
 
+    return "Login successful (forwarded to VPS)"  
         except Exception as e:
             return str(e)
 

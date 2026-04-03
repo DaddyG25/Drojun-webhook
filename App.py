@@ -2,6 +2,7 @@ import os
 import datetime
 import math
 import time
+import requests
 from flask import Flask, request, jsonify, redirect
 from kiteconnect import KiteConnect
 
@@ -254,37 +255,23 @@ def login():
 # WEBHOOK (UNCHANGED)
 # ======================
 
+import requests
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-
     try:
         data = request.json
+        print("Forwarding to VPS:", data)
 
-        signal = data["signal"]
-        spot = float(data["price"])
+        VPS_URL = "http://168.144.78.119:8000/webhook"
 
-        symbol = select_option(spot, signal)
+        response = requests.post(VPS_URL, json=data, timeout=5)
 
-        ltp_data = kite.ltp([f"NFO:{symbol}"])
-        ltp = ltp_data[f"NFO:{symbol}"]["last_price"]
-
-        entry_price = max(ltp - 5, 0.5)
-
-        if not LIVE_TRADING:
-            return jsonify({"paper_trade": symbol})
-
-        order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=symbol,
-            transaction_type=kite.TRANSACTION_TYPE_BUY,
-            quantity=LOT_SIZE,
-            order_type=kite.ORDER_TYPE_LIMIT,
-            price=entry_price,
-            product=kite.PRODUCT_NRML
-        )
-
-        return jsonify({"status": "order placed", "symbol": symbol})
+        return jsonify({
+            "status": "forwarded",
+            "vps_response": response.text
+        })
 
     except Exception as e:
+        print("Forward error:", str(e))
         return jsonify({"error": str(e)})

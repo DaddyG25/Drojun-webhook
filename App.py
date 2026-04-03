@@ -124,7 +124,7 @@ def implied_volatility(price, S, K, T, r, option_type):
 
 
 # ======================
-# NEXT EXPIRY (NO 0DTE)
+# NEXT EXPIRY
 # ======================
 
 def get_nearest_expiry():
@@ -161,7 +161,7 @@ def get_option_symbol(strike, expiry, opt_type):
 
 
 # ======================
-# STRICT DELTA SEARCH (WITH RETRY)
+# DELTA SEARCH
 # ======================
 
 def find_delta_strike(spot, expiry, signal):
@@ -170,10 +170,6 @@ def find_delta_strike(spot, expiry, signal):
     T = max((expiry - today).days / 365, 0.01)
 
     atm = int(spot / STRIKE_STEP) * STRIKE_STEP
-
-    print("\n===== DELTA SEARCH START =====")
-    print("Spot:", spot)
-    print("ATM:", atm)
 
     if signal == "CALL":
         opt_type = "CE"
@@ -193,52 +189,26 @@ def find_delta_strike(spot, expiry, signal):
         if not symbol:
             continue
 
-        # 🔥 RETRY LOGIC ADDED
-        price = None
-
-        for attempt in range(3):
-            try:
-                ltp_data = kite.ltp([f"NFO:{symbol}"])
-                price = ltp_data[f"NFO:{symbol}"]["last_price"]
-                break
-            except Exception as e:
-                print(f"Retry {attempt+1} failed for {symbol}: {e}")
-                time.sleep(1)
-
-        if price is None:
-            print("Skipping strike due to API failure:", strike)
-            continue
+        ltp_data = kite.ltp([f"NFO:{symbol}"])
+        price = ltp_data[f"NFO:{symbol}"]["last_price"]
 
         iv = implied_volatility(price, spot, strike, T, RISK_FREE_RATE, opt_type)
         delta = abs(bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type))
 
-        print(f"Strike: {strike} | Price: {price} | IV: {round(iv,2)} | Delta: {round(delta,2)}")
-
         if delta >= TARGET_DELTA:
-            print("✅ SELECTED:", strike, "| DELTA:", round(delta,2))
-            print("===== DELTA SEARCH END =====\n")
             return symbol
 
-    print("❌ No strike found")
-    print("===== DELTA SEARCH END =====\n")
     return None
 
-
-# ======================
-# SELECT OPTION
-# ======================
 
 def select_option(spot, signal):
 
     expiry = get_nearest_expiry()
-
-    symbol = find_delta_strike(spot, expiry, signal)
-
-    return symbol
+    return find_delta_strike(spot, expiry, signal)
 
 
 # ======================
-# ROOT ROUTE
+# ROOT ROUTE (FIXED)
 # ======================
 
 @app.route("/")
@@ -249,20 +219,22 @@ def root():
     if request_token:
 
         try:
+            kite_local = KiteConnect(api_key=API_KEY)
 
-            session = kite.generate_session(
+            session = kite_local.generate_session(
                 request_token,
                 api_secret=API_SECRET
             )
 
             access_token = session["access_token"]
 
+            kite.set_access_token(access_token)
+
             print("NEW ACCESS TOKEN:", access_token)
 
             return "Login successful"
 
         except Exception as e:
-
             print("Token error:", str(e))
             return str(e)
 
@@ -275,7 +247,6 @@ def root():
 
 @app.route("/login")
 def login():
-
     return redirect(kite.login_url())
 
 
@@ -287,26 +258,17 @@ def login():
 def webhook():
 
     try:
-
         data = request.json
-        print("Webhook received:", data)
 
         signal = data["signal"]
         spot = float(data["price"])
 
         symbol = select_option(spot, signal)
 
-        print("Selected symbol:", symbol)
-
         ltp_data = kite.ltp([f"NFO:{symbol}"])
         ltp = ltp_data[f"NFO:{symbol}"]["last_price"]
 
         entry_price = max(ltp - 5, 0.5)
-
-        print("\n===== ORDER DETAILS =====")
-        print("Symbol:", symbol)
-        print("LTP:", ltp)
-        print("Limit Price (-5):", entry_price)
 
         if not LIVE_TRADING:
             return jsonify({"paper_trade": symbol})
@@ -322,70 +284,7 @@ def webhook():
             product=kite.PRODUCT_NRML
         )
 
-        print("Entry order placed:", order_id)
-
-        # WAIT FOR FILL
-        filled_price = None
-
-        for _ in range(10):
-
-            time.sleep(1)
-
-            orders = kite.orders()
-
-            for o in orders:
-
-                if o["order_id"] == order_id and o["status"] == "COMPLETE":
-                    filled_price = o["average_price"]
-                    break
-
-            if filled_price:
-                break
-
-        if not filled_price:
-            return jsonify({"status": "entry not filled yet"})
-
-        print("Entry filled:", filled_price)
-
-        sl_price = filled_price - SL_POINTS
-        target_price = filled_price + TARGET_POINTS
-
-        print("SL:", sl_price)
-        print("Target:", target_price)
-
-        kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=symbol,
-            transaction_type=kite.TRANSACTION_TYPE_SELL,
-            quantity=LOT_SIZE,
-            order_type=kite.ORDER_TYPE_SL,
-            price=sl_price,
-            trigger_price=sl_price,
-            product=kite.PRODUCT_NRML
-        )
-
-        kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=symbol,
-            transaction_type=kite.TRANSACTION_TYPE_SELL,
-            quantity=LOT_SIZE,
-            order_type=kite.ORDER_TYPE_LIMIT,
-            price=target_price,
-            product=kite.PRODUCT_NRML
-        )
-
-        return jsonify({
-            "status": "trade active",
-            "symbol": symbol,
-            "entry": filled_price,
-            "sl": sl_price,
-            "target": target_price
-        })
+        return jsonify({"status": "order placed", "symbol": symbol})
 
     except Exception as e:
-
-        print("Webhook error:", str(e))
-
         return jsonify({"error": str(e)})

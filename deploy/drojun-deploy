@@ -19,5 +19,6 @@ rsync -a --delete \
 chown -R drojun:drojun /opt/drojun/app /var/lib/drojun
 systemctl restart drojun
 sleep 2
-curl --fail --silent http://127.0.0.1:8000/health >/dev/null
+curl --fail --silent http://127.0.0.1:8001/health >/dev/null
 echo "Drojun deployment completed"
+

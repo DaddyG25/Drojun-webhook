@@ -19,16 +19,17 @@ The CCI length, delta, stop, target, quantity, entry offset, and live-trading sw
 
 ## Affordable deployment
 
-Drojun runs on the existing DigitalOcean Droplet. The Droplet supplies the required static outbound IP, SQLite stores durable state, Caddy supplies HTTPS, systemd keeps the service running, and GitHub Actions deploys updates. Railway and Termius are not needed after the one-time installation.
+Railway remains the public HTTPS gateway. The existing DigitalOcean Droplet is the private trading executor and supplies the required static outbound IP. Requests between them are signed with a shared secret. SQLite stores durable state, systemd keeps the executor running, and GitHub Actions deploys updates. Termius is not needed after the one-time installation.
 
-1. Point a hostname to the Droplet's static IP. A dedicated subdomain is recommended; an `IP_ADDRESS.sslip.io` hostname can avoid buying a domain initially.
-2. Clone the repository once on the Droplet and run `sudo ./deploy/bootstrap.sh bot.example.com`.
-3. Edit `/etc/drojun.env`, replace every `CHANGE_ME`, then restart with `sudo systemctl restart drojun`.
-4. Set the Kite redirect URL to `https://bot.example.com/kite/callback`.
-5. In GitHub Actions secrets, add `DEPLOY_HOST`, `DEPLOY_USER`, and `DEPLOY_SSH_KEY`. The deploy user needs permission to run `/usr/local/sbin/drojun-deploy` with sudo.
-6. Open the app root URL and complete Zerodha login each trading day.
-7. Add `tradingview/Drojun_CCI.pine` to the one-hour NIFTY chart, set the same webhook secret, and create an alert using **Any alert() function call** with webhook URL `https://bot.example.com/webhook`.
-8. Keep live trading disabled until the deployment and broker flow have been reviewed with a paper or minimal-risk run.
+1. Point a hostname to the Droplet's static IP. An `IP_ADDRESS.sslip.io` hostname can avoid buying a domain initially.
+2. Clone the repository once on the Droplet and run `sudo ./deploy/bootstrap.sh IP_ADDRESS.sslip.io`.
+3. Edit `/etc/drojun.env`, replace every `CHANGE_ME`, and copy its generated `GATEWAY_SHARED_SECRET`. Restart with `sudo systemctl restart drojun`.
+4. On Railway, set `APP_ROLE=gateway`, `EXECUTOR_BASE_URL=https://IP_ADDRESS.sslip.io`, and the same `GATEWAY_SHARED_SECRET`.
+5. Keep the Kite redirect URL pointed at `https://YOUR_RAILWAY_DOMAIN/kite/callback`.
+6. In GitHub Actions secrets, add `DEPLOY_HOST`, `DEPLOY_USER`, and `DEPLOY_SSH_KEY`. The deploy user needs permission to run `/usr/local/sbin/drojun-deploy` with sudo.
+7. Open the Railway URL and complete Zerodha login each trading day.
+8. Add `tradingview/Drojun_CCI.pine` to the one-hour NIFTY chart, set the same webhook secret, and create an alert using **Any alert() function call** with webhook URL `https://YOUR_RAILWAY_DOMAIN/webhook`.
+9. Keep live trading disabled until the gateway, executor, and broker flow have been reviewed with a controlled run.
 
 TradingView copies the script and inputs into an alert. After changing CCI length, delete and recreate the alert so the new value is active.
 
@@ -37,6 +38,7 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 - `GET /health` reports service, trading-switch, and daily Kite-login status without exposing secrets.
 - The root control panel uses HTTP Basic authentication.
 - Webhooks require the shared secret in the JSON body and are deduplicated by signal, bar close, and CCI length.
+- Railway signs every forwarded request; the executor rejects unsigned direct requests.
 - Signals are ignored while another signal or position is active and expire after five minutes.
 - Settings, signals, token state, and broker trigger IDs persist in SQLite on the Droplet.
 - Entry orders that remain unfilled for 30 seconds are cancelled.

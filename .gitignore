@@ -1,6 +1,13 @@
 .env
 *.db
 *.sqlite3
+access_token.txt
+last_result.txt
+selected_options.txt
+service_account.json
+*.save
+*.save.*
 __pycache__/
 *.py[cod]
 .venv/
+

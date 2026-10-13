@@ -83,8 +83,8 @@ class Trade(Base):
     symbol: Mapped[str] = mapped_column(String(64))
     quantity: Mapped[int] = mapped_column(Integer)
     entry_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    gtt_trigger_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     stop_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    target_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -309,6 +309,52 @@ def place_stop_with_retry(kite: KiteConnect, symbol: str, quantity: int, trigger
     raise RuntimeError(f"Protective stop could not be placed after three attempts: {last_error}")
 
 
+def place_exit_gtt_with_retry(
+    kite: KiteConnect,
+    symbol: str,
+    quantity: int,
+    last_price: float,
+    stop_trigger: float,
+    stop_limit: float,
+    target_price: float,
+) -> str:
+    orders = [
+        {
+            "transaction_type": kite.TRANSACTION_TYPE_SELL,
+            "quantity": quantity,
+            "order_type": kite.ORDER_TYPE_LIMIT,
+            "product": kite.PRODUCT_NRML,
+            "price": stop_limit,
+        },
+        {
+            "transaction_type": kite.TRANSACTION_TYPE_SELL,
+            "quantity": quantity,
+            "order_type": kite.ORDER_TYPE_LIMIT,
+            "product": kite.PRODUCT_NRML,
+            "price": target_price,
+        },
+    ]
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            result = kite.place_gtt(
+                trigger_type=kite.GTT_TYPE_OCO,
+                tradingsymbol=symbol,
+                exchange=kite.EXCHANGE_NFO,
+                trigger_values=[stop_trigger, target_price],
+                last_price=last_price,
+                orders=orders,
+            )
+            trigger_id = result.get("trigger_id") if isinstance(result, dict) else result
+            if trigger_id is None:
+                raise RuntimeError("Kite did not return a GTT trigger ID")
+            return str(trigger_id)
+        except Exception as exc:
+            last_error = exc
+            time.sleep(attempt + 1)
+    raise RuntimeError(f"GTT OCO exit could not be placed after three attempts: {last_error}")
+
+
 def claim_signal() -> int | None:
     with SessionLocal.begin() as db:
         active = db.scalar(select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1))
@@ -378,34 +424,34 @@ def process_signal(signal_id: int) -> None:
         stop_price = round_tick(entry_price - settings.stop_loss_points)
         stop_limit = round_tick(stop_price - 1.0)
         target_price = round_tick(entry_price + settings.target_points)
-        stop_id = place_stop_with_retry(kite, symbol, settings.lot_size, stop_price, stop_limit)
         trade.entry_price = entry_price
-        trade.stop_order_id = stop_id
         trade.stop_price = stop_price
+        trade.target_price = target_price
+        try:
+            trade.gtt_trigger_id = place_exit_gtt_with_retry(
+                kite,
+                symbol,
+                settings.lot_size,
+                entry_price,
+                stop_price,
+                stop_limit,
+                target_price,
+            )
+        except Exception as gtt_error:
+            trade.stop_order_id = place_stop_with_retry(kite, symbol, settings.lot_size, stop_price, stop_limit)
+            trade.status = "NEEDS_REVIEW"
+            trade.error = f"GTT OCO failed; a day-only emergency stop was placed: {str(gtt_error)[:500]}"
+            trade.updated_at = utcnow()
+            signal.status = "NEEDS_REVIEW"
+            signal.error = trade.error
+            signal.updated_at = utcnow()
+            db.commit()
+            return
         trade.status = "ACTIVE"
         trade.updated_at = utcnow()
         signal.status = "ACTIVE"
         signal.updated_at = utcnow()
         db.commit()
-        try:
-            target_id = kite.place_order(
-                variety=kite.VARIETY_REGULAR,
-                exchange=kite.EXCHANGE_NFO,
-                tradingsymbol=symbol,
-                transaction_type=kite.TRANSACTION_TYPE_SELL,
-                quantity=settings.lot_size,
-                product=kite.PRODUCT_NRML,
-                order_type=kite.ORDER_TYPE_LIMIT,
-                price=target_price,
-            )
-            trade.target_order_id = str(target_id)
-            trade.target_price = target_price
-            trade.updated_at = utcnow()
-            db.commit()
-        except Exception as exc:
-            trade.error = f"Target order failed; protective stop remains active: {str(exc)[:500]}"
-            signal.error = trade.error
-            db.commit()
 
 
 def mark_signal_error(signal_id: int, message: str) -> None:
@@ -430,39 +476,70 @@ def monitor_trades() -> None:
     if not trades:
         return
     kite = kite_client()
-    orders = {str(row.get("order_id")): row for row in kite.orders()}
+    position_quantities = {
+        str(row.get("tradingsymbol")): int(row.get("quantity", 0))
+        for row in (kite.positions().get("net") or [])
+        if row.get("exchange") == "NFO"
+    }
     for snapshot in trades:
-        stop = orders.get(str(snapshot.stop_order_id))
-        target = orders.get(str(snapshot.target_order_id))
-        stop_complete = bool(stop and stop.get("status") == "COMPLETE")
-        target_complete = bool(target and target.get("status") == "COMPLETE")
-        if stop and stop.get("status") in {"CANCELLED", "REJECTED"} and not target_complete:
-            with SessionLocal.begin() as db:
-                trade = db.get(Trade, snapshot.id)
-                signal = db.get(Signal, trade.signal_id) if trade else None
-                if trade:
-                    trade.status = "NEEDS_REVIEW"
-                    trade.error = f'Protective stop is {stop.get("status")}; verify the open position immediately'
-                    trade.updated_at = utcnow()
-                if signal:
-                    signal.status = "NEEDS_REVIEW"
-                    signal.error = trade.error
-                    signal.updated_at = utcnow()
+        if not snapshot.gtt_trigger_id:
             continue
-        if not stop_complete and not target_complete:
+        trigger = kite.get_gtt(int(snapshot.gtt_trigger_id))
+        trigger_status = str(trigger.get("status", "")).lower()
+        if trigger_status == "active":
+            if position_quantities.get(snapshot.symbol, 0) <= 0:
+                kite.delete_gtt(int(snapshot.gtt_trigger_id))
+                with SessionLocal.begin() as db:
+                    trade = db.get(Trade, snapshot.id)
+                    signal = db.get(Signal, trade.signal_id) if trade else None
+                    if trade:
+                        trade.status = "CLOSED_EXTERNALLY"
+                        trade.error = "Broker position was closed outside Drojun; the active GTT was deleted"
+                        trade.updated_at = utcnow()
+                    if signal:
+                        signal.status = "COMPLETE"
+                        signal.error = trade.error
+                        signal.updated_at = utcnow()
             continue
-        if stop_complete and not target_complete and target and target.get("status") not in {"CANCELLED", "REJECTED"}:
-            kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=snapshot.target_order_id)
-        elif target_complete and not stop_complete and stop and stop.get("status") not in {"CANCELLED", "REJECTED"}:
-            kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=snapshot.stop_order_id)
+        final_status = None
+        error = None
+        if trigger_status == "triggered":
+            triggered_leg = None
+            for index, leg in enumerate(trigger.get("orders") or []):
+                if leg.get("result") is not None:
+                    triggered_leg = (index, leg)
+                    break
+            if triggered_leg is None:
+                error = "GTT is triggered but Kite returned no triggered exit leg"
+            else:
+                index, leg = triggered_leg
+                order_result = (leg.get("result") or {}).get("order_result") or {}
+                if order_result.get("status") != "success" or not order_result.get("order_id"):
+                    error = f'GTT exit order failed: {order_result.get("rejection_reason", "unknown reason")}'
+                else:
+                    broker_order = order_by_id(kite, str(order_result["order_id"]))
+                    if broker_order and broker_order.get("status") == "COMPLETE":
+                        final_status = "STOPPED" if index == 0 else "TARGET_HIT"
+                    elif broker_order and broker_order.get("status") in {"CANCELLED", "REJECTED"}:
+                        error = f'GTT exit order is {broker_order.get("status")}: {broker_order.get("status_message", "")}'.strip()
+                    elif broker_order is None and position_quantities.get(snapshot.symbol, 0) <= 0:
+                        final_status = "STOPPED" if index == 0 else "TARGET_HIT"
+                    elif broker_order is None:
+                        error = "GTT exit was triggered but the broker position remains open; verify it immediately"
+                    else:
+                        continue
+        else:
+            error = f"GTT OCO is {trigger_status or 'in an unknown state'}; verify the open position immediately"
         with SessionLocal.begin() as db:
             trade = db.get(Trade, snapshot.id)
             signal = db.get(Signal, trade.signal_id) if trade else None
             if trade:
-                trade.status = "OVER_EXIT" if stop_complete and target_complete else ("STOPPED" if stop_complete else "TARGET_HIT")
+                trade.status = final_status or "NEEDS_REVIEW"
+                trade.error = error
                 trade.updated_at = utcnow()
             if signal:
-                signal.status = "COMPLETE"
+                signal.status = "COMPLETE" if final_status else "NEEDS_REVIEW"
+                signal.error = error
                 signal.updated_at = utcnow()
 
 

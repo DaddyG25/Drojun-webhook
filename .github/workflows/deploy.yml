@@ -1,0 +1,34 @@
+name: Deploy Drojun
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: drojun-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 0700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/drojun
+          chmod 0600 ~/.ssh/drojun
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Upload and activate release
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          rsync -az --delete -e 'ssh -i ~/.ssh/drojun' ./ "$DEPLOY_USER@$DEPLOY_HOST:/tmp/drojun-release/"
+          ssh -i ~/.ssh/drojun "$DEPLOY_USER@$DEPLOY_HOST" 'if [ "$(id -u)" -eq 0 ]; then /usr/local/sbin/drojun-deploy /tmp/drojun-release; else sudo /usr/local/sbin/drojun-deploy /tmp/drojun-release; fi'

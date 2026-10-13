@@ -20,6 +20,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 IST = ZoneInfo("Asia/Kolkata")
 LOG = logging.getLogger("drojun")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+BLOCKING_TRADE_STATUSES = ("ENTRY_PENDING", "ACTIVE", "NEEDS_REVIEW")
+BLOCKING_SIGNAL_STATUSES = ("QUEUED", "PROCESSING", "NEEDS_REVIEW")
 
 
 def database_url() -> str:
@@ -309,7 +311,7 @@ def place_stop_with_retry(kite: KiteConnect, symbol: str, quantity: int, trigger
 
 def claim_signal() -> int | None:
     with SessionLocal.begin() as db:
-        active = db.scalar(select(Trade.id).where(Trade.status.in_(["ENTRY_PENDING", "ACTIVE"])).limit(1))
+        active = db.scalar(select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1))
         if active is not None:
             return None
         signal = db.scalar(select(Signal).where(Signal.status == "QUEUED").order_by(Signal.id).with_for_update(skip_locked=True).limit(1))
@@ -590,8 +592,8 @@ def webhook():
             return jsonify(error=f"CCI length mismatch; expected {settings.cci_length}"), 409
         if not in_entry_window():
             return jsonify(error="outside the 09:15-15:15 IST entry window"), 409
-        active_trade = db.scalar(select(Trade.id).where(Trade.status.in_(["ENTRY_PENDING", "ACTIVE"])).limit(1))
-        pending_signal = db.scalar(select(Signal.id).where(Signal.status.in_(["QUEUED", "PROCESSING"])).limit(1))
+        active_trade = db.scalar(select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1))
+        pending_signal = db.scalar(select(Signal.id).where(Signal.status.in_(BLOCKING_SIGNAL_STATUSES)).limit(1))
         if active_trade is not None or pending_signal is not None:
             return jsonify(error="another signal or trade is already in progress"), 409
         raw_key = f"{side}|{bar_time}|{cci_length}"
@@ -630,3 +632,4 @@ start_worker_once()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+

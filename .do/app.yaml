@@ -1,0 +1,28 @@
+name: drojun
+region: blr
+egress:
+  type: DEDICATED_IP
+services:
+  - name: trading
+    environment_slug: python
+    github:
+      repo: DaddyG25/Drojun-webhook
+      branch: main
+      deploy_on_push: true
+    run_command: gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT App:app
+    source_dir: /
+    instance_count: 1
+    instance_size_slug: professional-xs
+    http_port: 8080
+    health_check:
+      http_path: /health
+    envs:
+      - key: DATABASE_URL
+        value: ${drojun-db.DATABASE_URL}
+        scope: RUN_TIME
+        type: GENERAL
+databases:
+  - name: drojun-db
+    engine: PG
+    version: "17"
+    production: false

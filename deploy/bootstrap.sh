@@ -13,16 +13,7 @@ if [[ -z "$PUBLIC_HOSTNAME" ]]; then
 fi
 
 apt-get update
-apt-get install -y python3-venv rsync curl gnupg openssl debian-keyring debian-archive-keyring apt-transport-https
-
-if ! command -v caddy >/dev/null 2>&1; then
-  curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
-    | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-  curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
-    | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
-  apt-get update
-  apt-get install -y caddy
-fi
+apt-get install -y python3-venv rsync curl openssl nginx certbot python3-certbot-nginx
 
 id drojun >/dev/null 2>&1 || useradd --system --home /opt/drojun --shell /usr/sbin/nologin drojun
 install -d -o drojun -g drojun /opt/drojun/app /var/lib/drojun
@@ -46,17 +37,30 @@ EOF
   chmod 0600 /etc/drojun.env
 fi
 
-cat >/etc/caddy/Caddyfile <<EOF
-$PUBLIC_HOSTNAME {
-  encode zstd gzip
-  reverse_proxy 127.0.0.1:8000
+cat >/etc/nginx/sites-available/drojun-executor <<EOF
+server {
+    listen 80;
+    server_name $PUBLIC_HOSTNAME;
+
+    location / {
+        proxy_pass http://127.0.0.1:8001;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
 }
 EOF
+ln -sfn /etc/nginx/sites-available/drojun-executor /etc/nginx/sites-enabled/drojun-executor
 
 systemctl daemon-reload
-systemctl enable drojun caddy
+systemctl enable drojun nginx
 /usr/local/sbin/drojun-deploy "$(pwd)"
-systemctl reload caddy
+nginx -t
+systemctl reload nginx
+certbot --nginx --non-interactive --agree-tos --register-unsafely-without-email --redirect -d "$PUBLIC_HOSTNAME"
+systemctl enable --now certbot.timer
 
 echo "Edit /etc/drojun.env, replace every CHANGE_ME value, then run: systemctl restart drojun"
-echo "Open https://$PUBLIC_HOSTNAME/ after DNS points to this Droplet."
+echo "Open https://$PUBLIC_HOSTNAME/ after the Railway gateway is configured."
+

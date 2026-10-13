@@ -9,7 +9,7 @@ User=drojun
 Group=drojun
 WorkingDirectory=/opt/drojun/app
 EnvironmentFile=/etc/drojun.env
-ExecStart=/opt/drojun/venv/bin/gunicorn --workers 1 --threads 4 --timeout 120 --bind 127.0.0.1:8000 Executor:app
+ExecStart=/opt/drojun/venv/bin/gunicorn --workers 1 --threads 4 --timeout 120 --bind 127.0.0.1:8001 Executor:app
 Restart=always
 RestartSec=5
 StateDirectory=drojun
@@ -22,3 +22,4 @@ ReadWritePaths=/var/lib/drojun
 
 [Install]
 WantedBy=multi-user.target
+

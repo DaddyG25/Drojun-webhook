@@ -19,7 +19,7 @@ The CCI length, delta, stop, target, quantity, entry offset, and live-trading sw
 
 ## Affordable deployment
 
-Railway remains the public HTTPS gateway. The existing DigitalOcean Droplet is the private trading executor and supplies the required static outbound IP. Requests between them are signed with a shared secret. SQLite stores durable state, systemd keeps the executor running, and GitHub Actions deploys updates. Termius is not needed after the one-time installation.
+Railway remains the public HTTPS gateway. The existing DigitalOcean Droplet is the private trading executor and supplies the required static outbound IP. Requests between them are signed with a shared secret. SQLite stores durable state, systemd keeps the executor running, Nginx provides HTTPS, and GitHub Actions deploys updates. Termius is not needed after the one-time installation.
 
 1. Point a hostname to the Droplet's static IP. An `IP_ADDRESS.sslip.io` hostname can avoid buying a domain initially.
 2. Clone the repository once on the Droplet and run `sudo ./deploy/bootstrap.sh IP_ADDRESS.sslip.io`.
@@ -45,3 +45,4 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 - Stop and target use Kite's native two-leg GTT OCO trigger, so the protection persists overnight and Kite cancels the unused leg.
 
 Kite access tokens expire the next morning. The service remains online continuously, but Zerodha login must still be completed each trading day.
+

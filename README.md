@@ -40,6 +40,7 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 - Signals are ignored while another signal or position is active and expire after five minutes.
 - Settings, signals, token state, and order IDs persist in PostgreSQL.
 - Entry orders that remain unfilled for 30 seconds are cancelled.
-- Stop and target orders are tracked by their broker order IDs; when one fills, the sibling is cancelled.
+- Stop and target use Kite's native two-leg GTT OCO trigger, so the protection persists overnight and Kite cancels the unused leg.
 
 Kite access tokens expire the next morning. The service remains online continuously, but Zerodha login must still be completed each trading day.
+

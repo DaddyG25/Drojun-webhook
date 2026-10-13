@@ -17,18 +17,18 @@ Drojun receives confirmed one-hour CCI zone-entry alerts from TradingView and ma
 
 The CCI length, delta, stop, target, quantity, entry offset, and live-trading switch are editable on the password-protected control panel.
 
-## Managed deployment
+## Affordable deployment
 
-The `.do/app.yaml` specification runs the app on DigitalOcean App Platform with PostgreSQL and dedicated egress IPs. It removes the Droplet, Termius, SFTP, and Railway-to-VPS forwarding path.
+Drojun runs on the existing DigitalOcean Droplet. The Droplet supplies the required static outbound IP, SQLite stores durable state, Caddy supplies HTTPS, systemd keeps the service running, and GitHub Actions deploys updates. Railway and Termius are not needed after the one-time installation.
 
-After creating the app:
-
-1. Add `FLASK_SECRET_KEY`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `WEBHOOK_SECRET`, `KITE_API_KEY`, `KITE_API_SECRET`, and `KITE_USER_ID` as encrypted run-time variables.
-2. Copy both dedicated egress IPs from the app Networking page and whitelist them in Kite Connect.
-3. Set the Kite redirect URL to `https://YOUR_APP_DOMAIN/kite/callback`.
-4. Open the app root URL and complete Zerodha login each trading day.
-5. Add `tradingview/Drojun_CCI.pine` to the one-hour NIFTY chart, set the same webhook secret, and create an alert using **Any alert() function call** with webhook URL `https://YOUR_APP_DOMAIN/webhook`.
-6. Keep live trading disabled until the deployment and broker flow have been reviewed with a paper or minimal-risk run.
+1. Point a hostname to the Droplet's static IP. A dedicated subdomain is recommended; an `IP_ADDRESS.sslip.io` hostname can avoid buying a domain initially.
+2. Clone the repository once on the Droplet and run `sudo ./deploy/bootstrap.sh bot.example.com`.
+3. Edit `/etc/drojun.env`, replace every `CHANGE_ME`, then restart with `sudo systemctl restart drojun`.
+4. Set the Kite redirect URL to `https://bot.example.com/kite/callback`.
+5. In GitHub Actions secrets, add `DEPLOY_HOST`, `DEPLOY_USER`, and `DEPLOY_SSH_KEY`. The deploy user needs permission to run `/usr/local/sbin/drojun-deploy` with sudo.
+6. Open the app root URL and complete Zerodha login each trading day.
+7. Add `tradingview/Drojun_CCI.pine` to the one-hour NIFTY chart, set the same webhook secret, and create an alert using **Any alert() function call** with webhook URL `https://bot.example.com/webhook`.
+8. Keep live trading disabled until the deployment and broker flow have been reviewed with a paper or minimal-risk run.
 
 TradingView copies the script and inputs into an alert. After changing CCI length, delete and recreate the alert so the new value is active.
 
@@ -38,9 +38,8 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 - The root control panel uses HTTP Basic authentication.
 - Webhooks require the shared secret in the JSON body and are deduplicated by signal, bar close, and CCI length.
 - Signals are ignored while another signal or position is active and expire after five minutes.
-- Settings, signals, token state, and order IDs persist in PostgreSQL.
+- Settings, signals, token state, and broker trigger IDs persist in SQLite on the Droplet.
 - Entry orders that remain unfilled for 30 seconds are cancelled.
 - Stop and target use Kite's native two-leg GTT OCO trigger, so the protection persists overnight and Kite cancels the unused leg.
 
 Kite access tokens expire the next morning. The service remains online continuously, but Zerodha login must still be completed each trading day.
-

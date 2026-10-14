@@ -30,6 +30,24 @@ OPEN_PAPER_STATUSES = ("OPEN",)
 EXECUTION_DISABLED = 0
 EXECUTION_LIVE = 1
 EXECUTION_PAPER = 2
+EXECUTION_PAPER_AND_LIVE = 3
+
+
+def paper_enabled(execution_mode: int) -> bool:
+    return execution_mode in {EXECUTION_PAPER, EXECUTION_PAPER_AND_LIVE}
+
+
+def live_enabled(execution_mode: int) -> bool:
+    return execution_mode in {EXECUTION_LIVE, EXECUTION_PAPER_AND_LIVE}
+
+
+def execution_mode_name(execution_mode: int) -> str:
+    return {
+        EXECUTION_DISABLED: "disabled",
+        EXECUTION_LIVE: "live",
+        EXECUTION_PAPER: "paper",
+        EXECUTION_PAPER_AND_LIVE: "paper_and_live",
+    }.get(execution_mode, "unknown")
 
 
 def database_url() -> str:
@@ -534,8 +552,8 @@ def claim_signal() -> int | None:
     with SessionLocal.begin() as db:
         settings = db.get(StrategySettings, 1)
         execution_mode = int(settings.trading_enabled) if settings else EXECUTION_DISABLED
-        active = db.scalar(select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1)) if execution_mode == EXECUTION_LIVE else None
-        paper_active = db.scalar(select(PaperTrade.id).where(PaperTrade.status.in_(OPEN_PAPER_STATUSES)).limit(1)) if execution_mode == EXECUTION_PAPER else None
+        active = db.scalar(select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1)) if live_enabled(execution_mode) else None
+        paper_active = db.scalar(select(PaperTrade.id).where(PaperTrade.status.in_(OPEN_PAPER_STATUSES)).limit(1)) if paper_enabled(execution_mode) else None
         if active is not None or paper_active is not None:
             return None
         signal = db.scalar(select(Signal).where(Signal.status == "QUEUED").order_by(Signal.id).with_for_update(skip_locked=True).limit(1))
@@ -572,10 +590,11 @@ def process_signal(signal_id: int) -> None:
             signal.error = "Signal arrived outside the 09:15-15:15 IST entry window"
             db.commit()
             return
-        if execution_mode == EXECUTION_PAPER:
+        if paper_enabled(execution_mode):
             record_paper_trade(db, signal, settings)
+        if execution_mode == EXECUTION_PAPER:
             return
-        if execution_mode != EXECUTION_LIVE:
+        if not live_enabled(execution_mode):
             signal.status = "REJECTED"
             signal.error = "Unknown execution mode"
             db.commit()
@@ -750,9 +769,9 @@ def health():
         execution_mode = int(settings.trading_enabled) if settings else EXECUTION_DISABLED
         return jsonify(
             status="ok",
-            execution_mode={EXECUTION_DISABLED: "disabled", EXECUTION_PAPER: "paper", EXECUTION_LIVE: "live"}.get(execution_mode, "unknown"),
-            paper_trading_enabled=execution_mode == EXECUTION_PAPER,
-            trading_enabled=execution_mode == EXECUTION_LIVE,
+            execution_mode=execution_mode_name(execution_mode),
+            paper_trading_enabled=paper_enabled(execution_mode),
+            trading_enabled=live_enabled(execution_mode),
             kite_login_current=bool(state and token_is_current(state.token_issued_at)),
         )
 
@@ -843,7 +862,7 @@ body{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;color:
 <label>Stop loss points<input type="number" name="stop_loss_points" min="0.05" step="0.05" value="{{ s.stop_loss_points }}"></label>
 <label>Target points<input type="number" name="target_points" min="0.05" step="0.05" value="{{ s.target_points }}"></label>
 <label>Quantity<input type="number" name="lot_size" min="1" value="{{ s.lot_size }}"></label>
-<label>Execution mode<select name="execution_mode"><option value="0" {{ 'selected' if s.trading_enabled == 0 else '' }}>Disabled</option><option value="2" {{ 'selected' if s.trading_enabled == 2 else '' }}>Paper trading</option><option value="1" {{ 'selected' if s.trading_enabled == 1 else '' }}>Live trading</option></select></label>
+<label>Execution mode<select name="execution_mode"><option value="0" {{ 'selected' if s.trading_enabled == 0 else '' }}>Disabled</option><option value="2" {{ 'selected' if s.trading_enabled == 2 else '' }}>Paper trading</option><option value="1" {{ 'selected' if s.trading_enabled == 1 else '' }}>Live trading</option><option value="3" {{ 'selected' if s.trading_enabled == 3 else '' }}>Paper journal + live trading</option></select></label>
 <button type="submit">Save settings</button></form><p><small>Contract delta is estimated from the TradingView spot price and configured ESTIMATED_IV, so the free Kite Personal API is sufficient. After changing CCI length, recreate the TradingView alert with the same value.</small></p></div>
 <div class="card"><h2>Paper trade journal</h2><p><a href="/journal.csv">Download CSV</a></p><div class="scroll"><table><thead><tr><th>Opened (IST)</th><th>Side</th><th>Contract</th><th>Qty</th><th>Spot</th><th>Delta</th><th>Entry</th><th>Mark</th><th>Stop</th><th>Target</th><th>Status</th><th>P&amp;L</th></tr></thead><tbody>{% for x in paper_journal %}<tr><td>{{ format_ist(x.opened_at) }}</td><td>{{ x.side }}</td><td>{{ x.symbol }}</td><td>{{ x.quantity }}</td><td>{{ '%.2f'|format(x.entry_spot) }}</td><td>{{ '%.3f'|format(x.entry_delta) }}</td><td>{{ '%.2f'|format(x.entry_price) }}</td><td>{{ '%.2f'|format(x.exit_price if x.exit_price is not none else x.last_price) }}</td><td>{{ '%.2f'|format(x.stop_price) }}</td><td>{{ '%.2f'|format(x.target_price) }}</td><td>{{ x.status }}</td><td>{{ '%.2f'|format(paper_pnl(x)) }}</td></tr>{% else %}<tr><td colspan="12">No paper trades yet</td></tr>{% endfor %}</tbody></table></div><p><small>Paper option prices are Black-Scholes estimates using ESTIMATED_IV. Hourly TradingView bar updates mark open paper trades and close them when the estimated stop or target is reached.</small></p></div>
 <div class="card"><h2>Recent signals</h2><ul>{% for x in signals %}<li>{{ x.created_at }} — {{ x.side }} — {{ x.status }}{% if x.error %}: {{ x.error }}{% endif %}</li>{% else %}<li>No signals yet</li>{% endfor %}</ul></div>
@@ -867,7 +886,7 @@ def admin():
             settings.target_points = float(request.form["target_points"])
             settings.lot_size = int(request.form["lot_size"])
             settings.trading_enabled = int(request.form["execution_mode"])
-            if not (2 <= settings.cci_length <= 500 and 0.01 <= settings.min_delta <= 0.99 and settings.stop_loss_points > 0 and settings.target_points > 0 and settings.lot_size > 0 and settings.trading_enabled in {EXECUTION_DISABLED, EXECUTION_PAPER, EXECUTION_LIVE}):
+            if not (2 <= settings.cci_length <= 500 and 0.01 <= settings.min_delta <= 0.99 and settings.stop_loss_points > 0 and settings.target_points > 0 and settings.lot_size > 0 and settings.trading_enabled in {EXECUTION_DISABLED, EXECUTION_PAPER, EXECUTION_LIVE, EXECUTION_PAPER_AND_LIVE}):
                 return "Invalid settings", 400
             settings.updated_at = utcnow()
             db.commit()
@@ -949,14 +968,14 @@ def webhook():
         return jsonify(error="execution is disabled"), 409
     if cci_length != expected_cci_length:
         return jsonify(error=f"CCI length mismatch; expected {expected_cci_length}"), 409
-    paper_mark = mark_paper_journal(spot, bar_time) if execution_mode == EXECUTION_PAPER else {}
+    paper_mark = mark_paper_journal(spot, bar_time) if paper_enabled(execution_mode) else {}
     if side == "NONE":
-        return jsonify(status="bar_recorded", execution_mode="paper" if execution_mode == EXECUTION_PAPER else "live", **paper_mark), 200
+        return jsonify(status="bar_recorded", execution_mode=execution_mode_name(execution_mode), **paper_mark), 200
     if not in_entry_window():
         return jsonify(error="outside the 09:15-15:15 IST entry window"), 409
     with SessionLocal() as db:
-        active_trade = db.scalar(select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1)) if execution_mode == EXECUTION_LIVE else None
-        active_paper = db.scalar(select(PaperTrade.id).where(PaperTrade.status.in_(OPEN_PAPER_STATUSES)).limit(1)) if execution_mode == EXECUTION_PAPER else None
+        active_trade = db.scalar(select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1)) if live_enabled(execution_mode) else None
+        active_paper = db.scalar(select(PaperTrade.id).where(PaperTrade.status.in_(OPEN_PAPER_STATUSES)).limit(1)) if paper_enabled(execution_mode) else None
         pending_signal = db.scalar(select(Signal.id).where(Signal.status.in_(BLOCKING_SIGNAL_STATUSES)).limit(1))
         if active_trade is not None or active_paper is not None or pending_signal is not None:
             return jsonify(error="another signal or trade is already in progress"), 409
@@ -974,7 +993,7 @@ def webhook():
         except IntegrityError:
             db.rollback()
             return jsonify(status="duplicate_ignored"), 200
-        return jsonify(status="queued", signal_id=row.id, execution_mode="paper" if execution_mode == EXECUTION_PAPER else "live", **paper_mark), 202
+        return jsonify(status="queued", signal_id=row.id, execution_mode=execution_mode_name(execution_mode), **paper_mark), 202
 
 
 _worker_started = False

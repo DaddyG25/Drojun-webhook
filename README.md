@@ -15,7 +15,7 @@ Drojun receives confirmed one-hour CCI zone-entry alerts from TradingView and ma
 - No new entries after `15:15` IST
 - Same-day expiry is skipped
 
-The CCI length, delta, stop, target, quantity, and live-trading switch are editable on the password-protected control panel.
+The CCI length, delta, stop, target, quantity, and execution mode are editable on the password-protected control panel. Execution can be disabled, paper, or live.
 
 ## Affordable deployment
 
@@ -35,8 +35,9 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 
 ## Operations
 
-- `GET /health` reports service, trading-switch, and daily Kite-login status without exposing secrets.
+- `GET /health` reports service, execution-mode, and daily Kite-login status without exposing secrets.
 - `GET /broker/status` provides an authenticated view of nonzero positions, open orders, and active GTT triggers for preflight checks.
+- `GET /journal.csv` downloads the authenticated paper-trade journal.
 - The root control panel uses HTTP Basic authentication.
 - Kite app credentials can be replaced from the control panel and are saved with service-only permissions on the Droplet, so routine changes do not require Termius.
 - Webhooks require the shared secret in the JSON body and are deduplicated by signal, bar close, and CCI length.
@@ -44,6 +45,7 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 - Signals are ignored while another signal or position is active and expire after five minutes.
 - Settings, signals, token state, and broker trigger IDs persist in SQLite on the Droplet.
 - Contract delta is estimated from the TradingView spot price with `ESTIMATED_IV` (default `0.18`), avoiding the paid live quote API. The minimum delta remains editable on the control panel.
+- Paper mode never submits broker orders. It records the selected contract, estimated entry premium, stop, target, and quantity in the journal. Hourly TradingView bar updates mark open paper trades using the same Black-Scholes estimate and record stop, target, expiry, and estimated P&L outcomes.
 - Entry orders are placed at market and the actual fill price is used for the stop and target.
 - Stop and target use Kite's native two-leg GTT OCO trigger, so the protection persists overnight and Kite cancels the unused leg.
 

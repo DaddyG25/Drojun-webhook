@@ -1,6 +1,8 @@
 import datetime as dt
+import csv
 import hashlib
 import hmac
+import io
 import json
 import logging
 import math
@@ -12,7 +14,7 @@ from functools import wraps
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, redirect, render_template_string, request, session
+from flask import Flask, Response, jsonify, redirect, render_template_string, request, session
 from kiteconnect import KiteConnect
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, create_engine, select
 from sqlalchemy.exc import IntegrityError
@@ -24,6 +26,10 @@ LOG = logging.getLogger("drojun")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 BLOCKING_TRADE_STATUSES = ("ENTRY_PENDING", "ACTIVE", "NEEDS_REVIEW")
 BLOCKING_SIGNAL_STATUSES = ("QUEUED", "PROCESSING", "NEEDS_REVIEW")
+OPEN_PAPER_STATUSES = ("OPEN",)
+EXECUTION_DISABLED = 0
+EXECUTION_LIVE = 1
+EXECUTION_PAPER = 2
 
 
 def database_url() -> str:
@@ -93,6 +99,32 @@ class Trade(Base):
     status: Mapped[str] = mapped_column(String(24), default="ENTRY_PENDING", index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+
+
+class PaperTrade(Base):
+    __tablename__ = "paper_trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), unique=True)
+    side: Mapped[str] = mapped_column(String(4))
+    symbol: Mapped[str] = mapped_column(String(64))
+    option_type: Mapped[str] = mapped_column(String(2))
+    strike: Mapped[float] = mapped_column(Float)
+    expiry: Mapped[str] = mapped_column(String(10))
+    quantity: Mapped[int] = mapped_column(Integer)
+    entry_spot: Mapped[float] = mapped_column(Float)
+    entry_delta: Mapped[float] = mapped_column(Float)
+    entry_price: Mapped[float] = mapped_column(Float)
+    stop_price: Mapped[float] = mapped_column(Float)
+    target_price: Mapped[float] = mapped_column(Float)
+    last_spot: Mapped[float] = mapped_column(Float)
+    last_price: Mapped[float] = mapped_column(Float)
+    exit_spot: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="OPEN", index=True)
+    opened_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    closed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
 
 
@@ -166,6 +198,18 @@ def admin_required(view):
 
 def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+def format_ist(value: dt.datetime | None) -> str:
+    if value is None:
+        return ""
+    aware = value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
+    return aware.astimezone(IST).strftime("%Y-%m-%d %H:%M")
+
+
+def paper_pnl(trade: PaperTrade) -> float:
+    mark = trade.exit_price if trade.exit_price is not None else trade.last_price
+    return (mark - trade.entry_price) * trade.quantity
 
 
 def token_is_current(issued_at: dt.datetime | None) -> bool:
@@ -245,6 +289,15 @@ def option_delta(spot: float, strike: float, years: float, rate: float, volatili
     return norm_cdf(d1) if option_type == "CE" else norm_cdf(d1) - 1.0
 
 
+def option_price(spot: float, strike: float, years: float, rate: float, volatility: float, option_type: str) -> float:
+    d1 = (math.log(spot / strike) + (rate + 0.5 * volatility**2) * years) / (volatility * math.sqrt(years))
+    d2 = d1 - volatility * math.sqrt(years)
+    discounted_strike = strike * math.exp(-rate * years)
+    if option_type == "CE":
+        return spot * norm_cdf(d1) - discounted_strike * norm_cdf(d2)
+    return discounted_strike * norm_cdf(-d2) - spot * norm_cdf(-d1)
+
+
 _instrument_lock = threading.Lock()
 _instrument_cache: tuple[dt.date, list[dict]] | None = None
 
@@ -263,7 +316,7 @@ def nifty_options(kite: KiteConnect) -> list[dict]:
         return instruments
 
 
-def choose_contract(kite: KiteConnect, spot: float, side: str, min_delta: float) -> str:
+def choose_contract_details(kite: KiteConnect, spot: float, side: str, min_delta: float) -> dict:
     options = nifty_options(kite)
     today = utcnow().astimezone(IST).date()
     expiries = sorted({item["expiry"] for item in options if item["expiry"] > today})
@@ -286,16 +339,29 @@ def choose_contract(kite: KiteConnect, spot: float, side: str, min_delta: float)
     estimated_iv = float(os.getenv("ESTIMATED_IV", "0.18"))
     if not 0.01 <= estimated_iv <= 5.0:
         raise RuntimeError("ESTIMATED_IV must be between 0.01 and 5.0")
-    eligible: list[tuple[float, float, str]] = []
+    eligible: list[tuple[float, float, dict, float]] = []
     for item in candidates:
-        symbol = item["tradingsymbol"]
         delta = abs(option_delta(spot, float(item["strike"]), years, 0.06, estimated_iv, option_type))
         if delta >= min_delta:
-            eligible.append((delta - min_delta, abs(float(item["strike"]) - spot), symbol))
+            eligible.append((delta - min_delta, abs(float(item["strike"]) - spot), item, delta))
     if not eligible:
         raise RuntimeError(f"No ITM option met the configured minimum delta of {min_delta:.2f}")
-    eligible.sort()
-    return eligible[0][2]
+    eligible.sort(key=lambda row: (row[0], row[1], str(row[2]["tradingsymbol"])))
+    item = eligible[0][2]
+    delta = eligible[0][3]
+    premium = round_tick(option_price(spot, float(item["strike"]), years, 0.06, estimated_iv, option_type))
+    return {
+        "symbol": str(item["tradingsymbol"]),
+        "strike": float(item["strike"]),
+        "expiry": expiry,
+        "option_type": option_type,
+        "delta": delta,
+        "estimated_price": premium,
+    }
+
+
+def choose_contract(kite: KiteConnect, spot: float, side: str, min_delta: float) -> str:
+    return str(choose_contract_details(kite, spot, side, min_delta)["symbol"])
 
 
 def order_by_id(kite: KiteConnect, order_id: str) -> dict | None:
@@ -382,10 +448,95 @@ def place_exit_gtt_with_retry(
     raise RuntimeError(f"GTT OCO exit could not be placed after three attempts: {last_error}")
 
 
+def parse_bar_time(value: str) -> dt.datetime:
+    try:
+        return dt.datetime.fromtimestamp(int(value) / 1000.0, tz=dt.timezone.utc)
+    except (TypeError, ValueError, OSError):
+        try:
+            parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return utcnow()
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def paper_mark_price(trade: PaperTrade, spot: float, marked_at: dt.datetime) -> float:
+    expiry = dt.date.fromisoformat(trade.expiry)
+    expiry_at = dt.datetime.combine(expiry, dt.time(15, 30), tzinfo=IST)
+    current = marked_at.astimezone(IST)
+    if current >= expiry_at:
+        intrinsic = max(spot - trade.strike, 0.0) if trade.option_type == "CE" else max(trade.strike - spot, 0.0)
+        return round_tick(intrinsic)
+    years = max((expiry_at - current).total_seconds() / (365.0 * 24 * 60 * 60), 1.0 / (365.0 * 24))
+    estimated_iv = float(os.getenv("ESTIMATED_IV", "0.18"))
+    return round_tick(option_price(spot, trade.strike, years, 0.06, estimated_iv, trade.option_type))
+
+
+def mark_paper_journal(spot: float, bar_time: str) -> dict:
+    marked_at = parse_bar_time(bar_time)
+    updated = 0
+    closed = 0
+    with SessionLocal.begin() as db:
+        trades = list(db.scalars(select(PaperTrade).where(PaperTrade.status.in_(OPEN_PAPER_STATUSES))))
+        for trade in trades:
+            price = paper_mark_price(trade, spot, marked_at)
+            trade.last_spot = spot
+            trade.last_price = price
+            trade.updated_at = marked_at
+            expiry_at = dt.datetime.combine(dt.date.fromisoformat(trade.expiry), dt.time(15, 30), tzinfo=IST)
+            final_status = None
+            if price <= trade.stop_price:
+                final_status = "STOPPED"
+            elif price >= trade.target_price:
+                final_status = "TARGET_HIT"
+            elif marked_at.astimezone(IST) >= expiry_at:
+                final_status = "EXPIRED"
+            if final_status:
+                trade.status = final_status
+                trade.exit_spot = spot
+                trade.exit_price = price
+                trade.closed_at = marked_at
+                signal = db.get(Signal, trade.signal_id)
+                if signal:
+                    signal.status = "COMPLETE"
+                    signal.updated_at = marked_at
+                closed += 1
+            updated += 1
+    return {"paper_trades_updated": updated, "paper_trades_closed": closed}
+
+
+def record_paper_trade(db, signal: Signal, settings: StrategySettings) -> None:
+    kite = kite_client(require_token=False)
+    contract = choose_contract_details(kite, signal.spot, signal.side, settings.min_delta)
+    entry_price = float(contract["estimated_price"])
+    trade = PaperTrade(
+        signal_id=signal.id,
+        side=signal.side,
+        symbol=str(contract["symbol"]),
+        option_type=str(contract["option_type"]),
+        strike=float(contract["strike"]),
+        expiry=contract["expiry"].isoformat(),
+        quantity=settings.lot_size,
+        entry_spot=signal.spot,
+        entry_delta=float(contract["delta"]),
+        entry_price=entry_price,
+        stop_price=round_tick(entry_price - settings.stop_loss_points),
+        target_price=round_tick(entry_price + settings.target_points),
+        last_spot=signal.spot,
+        last_price=entry_price,
+    )
+    db.add(trade)
+    signal.status = "PAPER_ACTIVE"
+    signal.updated_at = utcnow()
+    db.commit()
+
+
 def claim_signal() -> int | None:
     with SessionLocal.begin() as db:
-        active = db.scalar(select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1))
-        if active is not None:
+        settings = db.get(StrategySettings, 1)
+        execution_mode = int(settings.trading_enabled) if settings else EXECUTION_DISABLED
+        active = db.scalar(select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1)) if execution_mode == EXECUTION_LIVE else None
+        paper_active = db.scalar(select(PaperTrade.id).where(PaperTrade.status.in_(OPEN_PAPER_STATUSES)).limit(1)) if execution_mode == EXECUTION_PAPER else None
+        if active is not None or paper_active is not None:
             return None
         signal = db.scalar(select(Signal).where(Signal.status == "QUEUED").order_by(Signal.id).with_for_update(skip_locked=True).limit(1))
         if signal is None:
@@ -410,14 +561,23 @@ def process_signal(signal_id: int) -> None:
             signal.error = f"Signal was older than {max_age} seconds"
             db.commit()
             return
-        if not settings.trading_enabled:
+        execution_mode = int(settings.trading_enabled)
+        if execution_mode == EXECUTION_DISABLED:
             signal.status = "REJECTED"
-            signal.error = "Trading is disabled"
+            signal.error = "Execution is disabled"
             db.commit()
             return
         if not in_entry_window():
             signal.status = "REJECTED"
             signal.error = "Signal arrived outside the 09:15-15:15 IST entry window"
+            db.commit()
+            return
+        if execution_mode == EXECUTION_PAPER:
+            record_paper_trade(db, signal, settings)
+            return
+        if execution_mode != EXECUTION_LIVE:
+            signal.status = "REJECTED"
+            signal.error = "Unknown execution mode"
             db.commit()
             return
         kite = kite_client()
@@ -587,9 +747,12 @@ def health():
     with SessionLocal() as db:
         state = db.get(RuntimeState, 1)
         settings = db.get(StrategySettings, 1)
+        execution_mode = int(settings.trading_enabled) if settings else EXECUTION_DISABLED
         return jsonify(
             status="ok",
-            trading_enabled=bool(settings and settings.trading_enabled),
+            execution_mode={EXECUTION_DISABLED: "disabled", EXECUTION_PAPER: "paper", EXECUTION_LIVE: "live"}.get(execution_mode, "unknown"),
+            paper_trading_enabled=execution_mode == EXECUTION_PAPER,
+            trading_enabled=execution_mode == EXECUTION_LIVE,
             kite_login_current=bool(state and token_is_current(state.token_issued_at)),
         )
 
@@ -638,10 +801,40 @@ def broker_status():
     )
 
 
+@app.get("/journal.csv")
+@admin_required
+def paper_journal_csv():
+    with SessionLocal() as db:
+        rows = list(db.scalars(select(PaperTrade).order_by(PaperTrade.id)))
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "id", "opened_at_ist", "closed_at_ist", "side", "symbol", "expiry", "strike", "quantity",
+        "entry_spot", "entry_delta", "entry_price", "stop_price", "target_price", "last_spot", "last_price",
+        "status", "exit_spot", "exit_price", "pnl",
+    ])
+    for row in rows:
+        opened = row.opened_at.replace(tzinfo=row.opened_at.tzinfo or dt.timezone.utc).astimezone(IST)
+        closed = row.closed_at.replace(tzinfo=row.closed_at.tzinfo or dt.timezone.utc).astimezone(IST) if row.closed_at else None
+        pnl = paper_pnl(row)
+        writer.writerow([
+            row.id, opened.isoformat(), closed.isoformat() if closed else "", row.side, row.symbol, row.expiry,
+            row.strike, row.quantity, row.entry_spot, row.entry_delta, row.entry_price, row.stop_price,
+            row.target_price, row.last_spot, row.last_price, row.status,
+            row.exit_spot if row.exit_spot is not None else "",
+            row.exit_price if row.exit_price is not None else "", pnl,
+        ])
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=drojun-paper-journal.csv"},
+    )
+
+
 ADMIN_PAGE = """
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Drojun control panel</title><style>
-body{font:16px system-ui;max-width:760px;margin:40px auto;padding:0 20px;color:#18212f}form{display:grid;grid-template-columns:1fr 1fr;gap:14px}label{display:grid;gap:5px}input,select,button{font:inherit;padding:9px}button{grid-column:1/-1}.card{padding:20px;border:1px solid #ccd3dc;border-radius:12px;margin:18px 0}.ok{color:#087830}.bad{color:#b42318}small{color:#56606f}</style></head><body>
+body{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;color:#18212f}form{display:grid;grid-template-columns:1fr 1fr;gap:14px}label{display:grid;gap:5px}input,select,button{font:inherit;padding:9px}button{grid-column:1/-1}.card{padding:20px;border:1px solid #ccd3dc;border-radius:12px;margin:18px 0}.ok{color:#087830}.bad{color:#b42318}small{color:#56606f}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;padding:8px;border-bottom:1px solid #e4e7ec;white-space:nowrap}.scroll{overflow:auto}</style></head><body>
 <h1>Drojun</h1><div class="card"><b>Kite session:</b> <span class="{{ 'ok' if token_current else 'bad' }}">{{ 'ready' if token_current else 'login required' }}</span><br><br><a href="/kite/login">Log in to Zerodha</a></div>
 <div class="card"><h2>Kite app credentials</h2><p>Current API key: <code>{{ kite_key or 'not configured' }}</code></p><form method="post" action="/kite/credentials"><input type="hidden" name="csrf" value="{{ csrf }}"><label>API key<input name="api_key" minlength="16" maxlength="16" required></label><label>API secret<input type="password" name="api_secret" minlength="32" maxlength="32" required></label><button type="submit">Save Kite credentials</button></form></div>
 <div class="card"><h2>Strategy settings</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
@@ -650,8 +843,9 @@ body{font:16px system-ui;max-width:760px;margin:40px auto;padding:0 20px;color:#
 <label>Stop loss points<input type="number" name="stop_loss_points" min="0.05" step="0.05" value="{{ s.stop_loss_points }}"></label>
 <label>Target points<input type="number" name="target_points" min="0.05" step="0.05" value="{{ s.target_points }}"></label>
 <label>Quantity<input type="number" name="lot_size" min="1" value="{{ s.lot_size }}"></label>
-<label>Live trading<select name="trading_enabled"><option value="0" {{ 'selected' if not s.trading_enabled else '' }}>Disabled</option><option value="1" {{ 'selected' if s.trading_enabled else '' }}>Enabled</option></select></label>
+<label>Execution mode<select name="execution_mode"><option value="0" {{ 'selected' if s.trading_enabled == 0 else '' }}>Disabled</option><option value="2" {{ 'selected' if s.trading_enabled == 2 else '' }}>Paper trading</option><option value="1" {{ 'selected' if s.trading_enabled == 1 else '' }}>Live trading</option></select></label>
 <button type="submit">Save settings</button></form><p><small>Contract delta is estimated from the TradingView spot price and configured ESTIMATED_IV, so the free Kite Personal API is sufficient. After changing CCI length, recreate the TradingView alert with the same value.</small></p></div>
+<div class="card"><h2>Paper trade journal</h2><p><a href="/journal.csv">Download CSV</a></p><div class="scroll"><table><thead><tr><th>Opened (IST)</th><th>Side</th><th>Contract</th><th>Qty</th><th>Spot</th><th>Delta</th><th>Entry</th><th>Mark</th><th>Stop</th><th>Target</th><th>Status</th><th>P&amp;L</th></tr></thead><tbody>{% for x in paper_journal %}<tr><td>{{ format_ist(x.opened_at) }}</td><td>{{ x.side }}</td><td>{{ x.symbol }}</td><td>{{ x.quantity }}</td><td>{{ '%.2f'|format(x.entry_spot) }}</td><td>{{ '%.3f'|format(x.entry_delta) }}</td><td>{{ '%.2f'|format(x.entry_price) }}</td><td>{{ '%.2f'|format(x.exit_price if x.exit_price is not none else x.last_price) }}</td><td>{{ '%.2f'|format(x.stop_price) }}</td><td>{{ '%.2f'|format(x.target_price) }}</td><td>{{ x.status }}</td><td>{{ '%.2f'|format(paper_pnl(x)) }}</td></tr>{% else %}<tr><td colspan="12">No paper trades yet</td></tr>{% endfor %}</tbody></table></div><p><small>Paper option prices are Black-Scholes estimates using ESTIMATED_IV. Hourly TradingView bar updates mark open paper trades and close them when the estimated stop or target is reached.</small></p></div>
 <div class="card"><h2>Recent signals</h2><ul>{% for x in signals %}<li>{{ x.created_at }} — {{ x.side }} — {{ x.status }}{% if x.error %}: {{ x.error }}{% endif %}</li>{% else %}<li>No signals yet</li>{% endfor %}</ul></div>
 <div class="card"><h2>Recent trades</h2><ul>{% for x in trades %}<li>{{ x.created_at }} — {{ x.symbol }} — {{ x.status }}{% if x.error %}: {{ x.error }}{% endif %}</li>{% else %}<li>No trades yet</li>{% endfor %}</ul></div>
 </body></html>
@@ -672,8 +866,8 @@ def admin():
             settings.stop_loss_points = float(request.form["stop_loss_points"])
             settings.target_points = float(request.form["target_points"])
             settings.lot_size = int(request.form["lot_size"])
-            settings.trading_enabled = int(request.form["trading_enabled"])
-            if not (2 <= settings.cci_length <= 500 and 0.01 <= settings.min_delta <= 0.99 and settings.stop_loss_points > 0 and settings.target_points > 0 and settings.lot_size > 0):
+            settings.trading_enabled = int(request.form["execution_mode"])
+            if not (2 <= settings.cci_length <= 500 and 0.01 <= settings.min_delta <= 0.99 and settings.stop_loss_points > 0 and settings.target_points > 0 and settings.lot_size > 0 and settings.trading_enabled in {EXECUTION_DISABLED, EXECUTION_PAPER, EXECUTION_LIVE}):
                 return "Invalid settings", 400
             settings.updated_at = utcnow()
             db.commit()
@@ -682,8 +876,9 @@ def admin():
         session["csrf"] = csrf
         recent = list(db.scalars(select(Signal).order_by(Signal.id.desc()).limit(10)))
         recent_trades = list(db.scalars(select(Trade).order_by(Trade.id.desc()).limit(10)))
+        paper_journal = list(db.scalars(select(PaperTrade).order_by(PaperTrade.id.desc()).limit(100)))
         kite_key, _ = kite_credentials()
-        return render_template_string(ADMIN_PAGE, s=settings, signals=recent, trades=recent_trades, csrf=csrf, token_current=bool(state and token_is_current(state.token_issued_at)), kite_key=kite_key)
+        return render_template_string(ADMIN_PAGE, s=settings, signals=recent, trades=recent_trades, paper_journal=paper_journal, format_ist=format_ist, paper_pnl=paper_pnl, csrf=csrf, token_current=bool(state and token_is_current(state.token_issued_at)), kite_key=kite_key)
 
 
 @app.post("/kite/credentials")
@@ -738,25 +933,32 @@ def webhook():
     if not secure_equal(str(data.get("secret", "")), os.getenv("WEBHOOK_SECRET")):
         return jsonify(error="unauthorized"), 401
     try:
-        side = str(data["signal"]).upper()
+        side = str(data.get("signal", "NONE")).upper()
         spot = float(data["price"])
         cci_length = int(data["cci_length"])
         bar_time = str(data["bar_time"])
     except (KeyError, TypeError, ValueError):
-        return jsonify(error="signal, price, cci_length and bar_time are required"), 400
-    if side not in {"CALL", "PUT"} or spot <= 0 or not bar_time:
+        return jsonify(error="price, cci_length and bar_time are required"), 400
+    if side not in {"CALL", "PUT", "NONE"} or spot <= 0 or not bar_time:
         return jsonify(error="invalid signal payload"), 400
     with SessionLocal() as db:
         settings = db.get(StrategySettings, 1)
-        if not settings.trading_enabled:
-            return jsonify(error="trading is disabled"), 409
-        if cci_length != settings.cci_length:
-            return jsonify(error=f"CCI length mismatch; expected {settings.cci_length}"), 409
-        if not in_entry_window():
-            return jsonify(error="outside the 09:15-15:15 IST entry window"), 409
-        active_trade = db.scalar(select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1))
+        execution_mode = int(settings.trading_enabled)
+        expected_cci_length = settings.cci_length
+    if execution_mode == EXECUTION_DISABLED:
+        return jsonify(error="execution is disabled"), 409
+    if cci_length != expected_cci_length:
+        return jsonify(error=f"CCI length mismatch; expected {expected_cci_length}"), 409
+    paper_mark = mark_paper_journal(spot, bar_time) if execution_mode == EXECUTION_PAPER else {}
+    if side == "NONE":
+        return jsonify(status="bar_recorded", execution_mode="paper" if execution_mode == EXECUTION_PAPER else "live", **paper_mark), 200
+    if not in_entry_window():
+        return jsonify(error="outside the 09:15-15:15 IST entry window"), 409
+    with SessionLocal() as db:
+        active_trade = db.scalar(select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1)) if execution_mode == EXECUTION_LIVE else None
+        active_paper = db.scalar(select(PaperTrade.id).where(PaperTrade.status.in_(OPEN_PAPER_STATUSES)).limit(1)) if execution_mode == EXECUTION_PAPER else None
         pending_signal = db.scalar(select(Signal.id).where(Signal.status.in_(BLOCKING_SIGNAL_STATUSES)).limit(1))
-        if active_trade is not None or pending_signal is not None:
+        if active_trade is not None or active_paper is not None or pending_signal is not None:
             return jsonify(error="another signal or trade is already in progress"), 409
         raw_key = f"{side}|{bar_time}|{cci_length}"
         row = Signal(
@@ -772,7 +974,7 @@ def webhook():
         except IntegrityError:
             db.rollback()
             return jsonify(status="duplicate_ignored"), 200
-        return jsonify(status="queued", signal_id=row.id), 202
+        return jsonify(status="queued", signal_id=row.id, execution_mode="paper" if execution_mode == EXECUTION_PAPER else "live", **paper_mark), 202
 
 
 _worker_started = False

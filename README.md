@@ -15,7 +15,7 @@ Drojun receives confirmed one-hour CCI zone-entry alerts from TradingView and ma
 - No new entries after `15:15` IST
 - Same-day expiry is skipped
 
-The CCI length, delta, stop, target, quantity, and execution mode are editable on the password-protected control panel. Execution can be disabled, paper, or live.
+The CCI length, delta, stop, target, quantity, and execution mode are editable on the password-protected control panel. Execution can be disabled, paper, live, or paper journal plus live.
 
 ## Affordable deployment
 
@@ -45,7 +45,7 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 - Signals are ignored while another signal or position is active and expire after five minutes.
 - Settings, signals, token state, and broker trigger IDs persist in SQLite on the Droplet.
 - Contract delta is estimated from the TradingView spot price with `ESTIMATED_IV` (default `0.18`), avoiding the paid live quote API. The minimum delta remains editable on the control panel.
-- Paper mode never submits broker orders. It records the selected contract, estimated entry premium, stop, target, and quantity in the journal. Hourly TradingView bar updates mark open paper trades using the same Black-Scholes estimate and record stop, target, expiry, and estimated P&L outcomes.
+- Paper mode never submits broker orders. It records the selected contract, estimated entry premium, stop, target, and quantity in the journal. Hourly TradingView bar updates mark open paper trades using the same Black-Scholes estimate and record stop, target, expiry, and estimated P&L outcomes. Combined paper-and-live mode keeps the same journal while also using the real broker order path.
 - Entry orders are placed at market and the actual fill price is used for the stop and target.
 - Stop and target use Kite's native two-leg GTT OCO trigger, so the protection persists overnight and Kite cancels the unused leg.
 

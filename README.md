@@ -39,6 +39,7 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 - `GET /broker/status` provides an authenticated view of nonzero positions, open orders, and active GTT triggers for preflight checks.
 - `GET /journal.csv` downloads the authenticated paper-trade journal.
 - The root control panel uses HTTP Basic authentication.
+- The authenticated control panel can replace its own admin username and password. The password is stored as a one-way hash in the durable database.
 - Kite app credentials can be replaced from the control panel and are saved with service-only permissions on the Droplet, so routine changes do not require Termius.
 - Webhooks require the shared secret in the JSON body and are deduplicated by signal, bar close, and CCI length.
 - Railway signs every forwarded request; the executor rejects unsigned direct requests.

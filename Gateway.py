@@ -13,6 +13,7 @@ app = Flask(__name__)
 ALLOWED_PATHS = {
     "",
     "health",
+    "admin/credentials",
     "broker/status",
     "journal.csv",
     "webhook",

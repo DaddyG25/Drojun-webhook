@@ -7,13 +7,12 @@ cciValue = ta.cci(hlc3, cciLength)
 
 callSignal = barstate.isconfirmed and ta.crossover(cciValue, 100)
 putSignal = barstate.isconfirmed and ta.crossunder(cciValue, -100)
+signalSide = callSignal ? "CALL" : putSignal ? "PUT" : "NONE"
 
 plot(cciValue, "CCI", color=color.blue)
 hline(100, "Upper", color=color.gray)
 hline(-100, "Lower", color=color.gray)
 
-if callSignal
-    alert('{"secret":"' + webhookSecret + '","signal":"CALL","price":' + str.tostring(close) + ',"cci_length":' + str.tostring(cciLength) + ',"bar_time":"' + str.tostring(time_close) + '"}', alert.freq_once_per_bar_close)
+if barstate.isconfirmed
+    alert('{"secret":"' + webhookSecret + '","signal":"' + signalSide + '","price":' + str.tostring(close) + ',"cci_length":' + str.tostring(cciLength) + ',"bar_time":"' + str.tostring(time_close) + '"}', alert.freq_once_per_bar_close)
 
-if putSignal
-    alert('{"secret":"' + webhookSecret + '","signal":"PUT","price":' + str.tostring(close) + ',"cci_length":' + str.tostring(cciLength) + ',"bar_time":"' + str.tostring(time_close) + '"}', alert.freq_once_per_bar_close)

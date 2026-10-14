@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE_DIR="${1:-/tmp/drojun-release}"
+if [[ ! -f "$SOURCE_DIR/App.py" || ! -f "$SOURCE_DIR/requirements.txt" ]]; then
+  echo "Release does not contain App.py and requirements.txt" >&2
+  exit 1
+fi
+
+install -d -o drojun -g drojun /opt/drojun/app /var/lib/drojun
+python3 -m venv /opt/drojun/venv
+/opt/drojun/venv/bin/pip install --disable-pip-version-check -r "$SOURCE_DIR/requirements.txt"
+rsync -a --delete \
+  --exclude '.git/' \
+  --exclude '.github/' \
+  --exclude 'deploy/' \
+  --exclude '*.db' \
+  "$SOURCE_DIR/" /opt/drojun/app/
+chown -R drojun:drojun /opt/drojun/app /var/lib/drojun
+systemctl restart drojun
+sleep 2
+curl --fail --silent http://127.0.0.1:8001/health >/dev/null
+echo "Drojun deployment completed"
+

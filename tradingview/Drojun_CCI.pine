@@ -2,7 +2,7 @@
 indicator("Drojun CCI signals", overlay=false)
 
 cciLength = input.int(50, "CCI length", minval=2)
-webhookSecret = input.string("CHANGE_ME", "Webhook secret")
+webhookSecret = input.string("CHANGE_ME", "Webhook secret", display=display.none)
 cciValue = ta.cci(hlc3, cciLength)
 
 callSignal = barstate.isconfirmed and ta.crossover(cciValue, 100)

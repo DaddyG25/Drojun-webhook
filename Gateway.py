@@ -16,6 +16,7 @@ ALLOWED_PATHS = {
     "webhook",
     "kite/login",
     "kite/callback",
+    "kite/credentials",
 }
 REQUEST_HEADERS = {"Authorization", "Content-Type", "Cookie", "User-Agent"}
 RESPONSE_HEADERS = {"Content-Type", "Location", "Set-Cookie", "WWW-Authenticate"}
@@ -73,3 +74,4 @@ def proxy(path: str):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+

@@ -1,6 +1,7 @@
 import datetime as dt
 import hashlib
 import hmac
+import json
 import logging
 import math
 import os
@@ -8,6 +9,7 @@ import secrets
 import threading
 import time
 from functools import wraps
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, redirect, render_template_string, request, session
@@ -178,8 +180,39 @@ def token_is_current(issued_at: dt.datetime | None) -> bool:
     return issued <= now < expiry
 
 
-def kite_client(require_token: bool = True) -> KiteConnect:
+_kite_credentials_lock = threading.Lock()
+
+
+def kite_credentials() -> tuple[str | None, str | None]:
     api_key = os.getenv("KITE_API_KEY")
+    api_secret = os.getenv("KITE_API_SECRET")
+    path = Path(os.getenv("KITE_CREDENTIALS_FILE", "/var/lib/drojun/kite_credentials.json"))
+    with _kite_credentials_lock:
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            saved = {}
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"Kite credentials file could not be read: {exc}") from exc
+    return saved.get("api_key") or api_key, saved.get("api_secret") or api_secret
+
+
+def save_kite_credentials(api_key: str, api_secret: str) -> None:
+    if not (len(api_key) == 16 and api_key.isalnum() and len(api_secret) == 32 and api_secret.isalnum()):
+        raise ValueError("Kite API key or secret has an unexpected format")
+    path = Path(os.getenv("KITE_CREDENTIALS_FILE", "/var/lib/drojun/kite_credentials.json"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    payload = json.dumps({"api_key": api_key, "api_secret": api_secret})
+    with _kite_credentials_lock:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(temporary, path)
+
+
+def kite_client(require_token: bool = True) -> KiteConnect:
+    api_key, _ = kite_credentials()
     if not api_key:
         raise RuntimeError("KITE_API_KEY is not configured")
     kite = KiteConnect(api_key=api_key)
@@ -566,6 +599,7 @@ ADMIN_PAGE = """
 <title>Drojun control panel</title><style>
 body{font:16px system-ui;max-width:760px;margin:40px auto;padding:0 20px;color:#18212f}form{display:grid;grid-template-columns:1fr 1fr;gap:14px}label{display:grid;gap:5px}input,select,button{font:inherit;padding:9px}button{grid-column:1/-1}.card{padding:20px;border:1px solid #ccd3dc;border-radius:12px;margin:18px 0}.ok{color:#087830}.bad{color:#b42318}small{color:#56606f}</style></head><body>
 <h1>Drojun</h1><div class="card"><b>Kite session:</b> <span class="{{ 'ok' if token_current else 'bad' }}">{{ 'ready' if token_current else 'login required' }}</span><br><br><a href="/kite/login">Log in to Zerodha</a></div>
+<div class="card"><h2>Kite app credentials</h2><p>Current API key: <code>{{ kite_key or 'not configured' }}</code></p><form method="post" action="/kite/credentials"><input type="hidden" name="csrf" value="{{ csrf }}"><label>API key<input name="api_key" minlength="16" maxlength="16" required></label><label>API secret<input type="password" name="api_secret" minlength="32" maxlength="32" required></label><button type="submit">Save Kite credentials</button></form></div>
 <div class="card"><h2>Strategy settings</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label>CCI length<input type="number" name="cci_length" min="2" max="500" value="{{ s.cci_length }}"></label>
 <label>Minimum delta<input type="number" name="min_delta" min="0.01" max="0.99" step="0.01" value="{{ s.min_delta }}"></label>
@@ -604,7 +638,25 @@ def admin():
         session["csrf"] = csrf
         recent = list(db.scalars(select(Signal).order_by(Signal.id.desc()).limit(10)))
         recent_trades = list(db.scalars(select(Trade).order_by(Trade.id.desc()).limit(10)))
-        return render_template_string(ADMIN_PAGE, s=settings, signals=recent, trades=recent_trades, csrf=csrf, token_current=bool(state and token_is_current(state.token_issued_at)))
+        kite_key, _ = kite_credentials()
+        return render_template_string(ADMIN_PAGE, s=settings, signals=recent, trades=recent_trades, csrf=csrf, token_current=bool(state and token_is_current(state.token_issued_at)), kite_key=kite_key)
+
+
+@app.post("/kite/credentials")
+@admin_required
+def update_kite_credentials():
+    if not secure_equal(request.form.get("csrf"), session.get("csrf")):
+        return "Invalid form token", 400
+    try:
+        save_kite_credentials(request.form.get("api_key", "").strip(), request.form.get("api_secret", "").strip())
+    except ValueError as exc:
+        return str(exc), 400
+    with SessionLocal.begin() as db:
+        state = db.get(RuntimeState, 1)
+        state.access_token = None
+        state.token_issued_at = None
+        state.updated_at = utcnow()
+    return redirect("/")
 
 
 @app.get("/kite/login")
@@ -618,7 +670,7 @@ def kite_callback():
     request_token = request.args.get("request_token")
     if request.args.get("status") != "success" or not request_token:
         return "Kite login did not succeed", 400
-    api_secret = os.getenv("KITE_API_SECRET")
+    _, api_secret = kite_credentials()
     if not api_secret:
         return "KITE_API_SECRET is not configured", 500
     kite = kite_client(require_token=False)

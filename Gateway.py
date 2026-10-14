@@ -13,6 +13,7 @@ app = Flask(__name__)
 ALLOWED_PATHS = {
     "",
     "health",
+    "broker/status",
     "webhook",
     "kite/login",
     "kite/callback",

@@ -36,6 +36,7 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 ## Operations
 
 - `GET /health` reports service, trading-switch, and daily Kite-login status without exposing secrets.
+- `GET /broker/status` provides an authenticated view of nonzero positions, open orders, and active GTT triggers for preflight checks.
 - The root control panel uses HTTP Basic authentication.
 - Kite app credentials can be replaced from the control panel and are saved with service-only permissions on the Droplet, so routine changes do not require Termius.
 - Webhooks require the shared secret in the JSON body and are deduplicated by signal, bar close, and CCI length.

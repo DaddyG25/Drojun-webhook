@@ -594,6 +594,50 @@ def health():
         )
 
 
+@app.get("/broker/status")
+@admin_required
+def broker_status():
+    kite = kite_client()
+    positions = [
+        {
+            "exchange": row.get("exchange"),
+            "symbol": row.get("tradingsymbol"),
+            "quantity": int(row.get("quantity", 0)),
+            "product": row.get("product"),
+        }
+        for row in (kite.positions().get("net") or [])
+        if int(row.get("quantity", 0)) != 0
+    ]
+    open_statuses = {"OPEN", "TRIGGER PENDING", "AMO REQ RECEIVED", "VALIDATION PENDING", "PUT ORDER REQ RECEIVED"}
+    orders = [
+        {
+            "order_id": str(row.get("order_id", "")),
+            "exchange": row.get("exchange"),
+            "symbol": row.get("tradingsymbol"),
+            "transaction_type": row.get("transaction_type"),
+            "quantity": int(row.get("quantity", 0)),
+            "status": row.get("status"),
+        }
+        for row in kite.orders()
+        if str(row.get("status", "")).upper() in open_statuses
+    ]
+    gtts = [
+        {
+            "trigger_id": str(row.get("id", "")),
+            "symbol": row.get("tradingsymbol"),
+            "status": row.get("status"),
+        }
+        for row in kite.get_gtts()
+        if str(row.get("status", "")).lower() in {"active", "triggered"}
+    ]
+    return jsonify(
+        status="ok",
+        open_positions=positions,
+        open_orders=orders,
+        active_gtts=gtts,
+    )
+
+
 ADMIN_PAGE = """
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Drojun control panel</title><style>

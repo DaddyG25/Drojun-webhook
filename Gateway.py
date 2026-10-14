@@ -14,6 +14,7 @@ ALLOWED_PATHS = {
     "",
     "health",
     "broker/status",
+    "journal.csv",
     "webhook",
     "kite/login",
     "kite/callback",

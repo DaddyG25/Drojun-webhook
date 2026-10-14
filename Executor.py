@@ -207,34 +207,6 @@ def norm_cdf(value: float) -> float:
     return (1.0 + math.erf(value / math.sqrt(2.0))) / 2.0
 
 
-def bs_price(spot: float, strike: float, years: float, rate: float, volatility: float, option_type: str) -> float:
-    if years <= 0:
-        return max(0.0, spot - strike) if option_type == "CE" else max(0.0, strike - spot)
-    root_t = math.sqrt(years)
-    d1 = (math.log(spot / strike) + (rate + 0.5 * volatility**2) * years) / (volatility * root_t)
-    d2 = d1 - volatility * root_t
-    if option_type == "CE":
-        return spot * norm_cdf(d1) - strike * math.exp(-rate * years) * norm_cdf(d2)
-    return strike * math.exp(-rate * years) * norm_cdf(-d2) - spot * norm_cdf(-d1)
-
-
-def implied_volatility(price: float, spot: float, strike: float, years: float, rate: float, option_type: str) -> float | None:
-    intrinsic = max(0.0, spot - strike) if option_type == "CE" else max(0.0, strike - spot)
-    if price <= intrinsic or spot <= 0 or strike <= 0:
-        return None
-    low, high = 0.01, 5.0
-    for _ in range(60):
-        middle = (low + high) / 2.0
-        estimate = bs_price(spot, strike, years, rate, middle, option_type)
-        if abs(estimate - price) < 0.01:
-            return middle
-        if estimate > price:
-            high = middle
-        else:
-            low = middle
-    return (low + high) / 2.0
-
-
 def option_delta(spot: float, strike: float, years: float, rate: float, volatility: float, option_type: str) -> float:
     d1 = (math.log(spot / strike) + (rate + 0.5 * volatility**2) * years) / (volatility * math.sqrt(years))
     return norm_cdf(d1) if option_type == "CE" else norm_cdf(d1) - 1.0
@@ -275,19 +247,16 @@ def choose_contract(kite: KiteConnect, spot: float, side: str, min_delta: float)
     ]
     if not candidates:
         raise RuntimeError("No eligible ITM NIFTY option contracts were found")
-    symbols = [f'NFO:{item["tradingsymbol"]}' for item in candidates]
-    quotes = kite.ltp(symbols)
-    years = max((expiry - today).days / 365.0, 1.0 / 365.0)
+    now = utcnow().astimezone(IST)
+    expiry_at = dt.datetime.combine(expiry, dt.time(15, 30), tzinfo=IST)
+    years = max((expiry_at - now).total_seconds() / (365.0 * 24 * 60 * 60), 1.0 / (365.0 * 24))
+    estimated_iv = float(os.getenv("ESTIMATED_IV", "0.18"))
+    if not 0.01 <= estimated_iv <= 5.0:
+        raise RuntimeError("ESTIMATED_IV must be between 0.01 and 5.0")
     eligible: list[tuple[float, float, str]] = []
     for item in candidates:
         symbol = item["tradingsymbol"]
-        quote = quotes.get(f"NFO:{symbol}")
-        if not quote or float(quote.get("last_price", 0)) <= 0:
-            continue
-        iv = implied_volatility(float(quote["last_price"]), spot, float(item["strike"]), years, 0.06, option_type)
-        if iv is None:
-            continue
-        delta = abs(option_delta(spot, float(item["strike"]), years, 0.06, iv, option_type))
+        delta = abs(option_delta(spot, float(item["strike"]), years, 0.06, estimated_iv, option_type))
         if delta >= min_delta:
             eligible.append((delta - min_delta, abs(float(item["strike"]) - spot), symbol))
     if not eligible:
@@ -420,8 +389,6 @@ def process_signal(signal_id: int) -> None:
             return
         kite = kite_client()
         symbol = choose_contract(kite, signal.spot, signal.side, settings.min_delta)
-        quote = kite.ltp([f"NFO:{symbol}"])[f"NFO:{symbol}"]
-        entry_limit = round_tick(float(quote["last_price"]) - settings.entry_offset_points)
         trade = Trade(signal_id=signal.id, symbol=symbol, quantity=settings.lot_size)
         db.add(trade)
         db.commit()
@@ -432,8 +399,7 @@ def process_signal(signal_id: int) -> None:
             transaction_type=kite.TRANSACTION_TYPE_BUY,
             quantity=settings.lot_size,
             product=kite.PRODUCT_NRML,
-            order_type=kite.ORDER_TYPE_LIMIT,
-            price=entry_limit,
+            order_type=kite.ORDER_TYPE_MARKET,
         )
         trade.entry_order_id = str(entry_order_id)
         trade.updated_at = utcnow()
@@ -606,9 +572,8 @@ body{font:16px system-ui;max-width:760px;margin:40px auto;padding:0 20px;color:#
 <label>Stop loss points<input type="number" name="stop_loss_points" min="0.05" step="0.05" value="{{ s.stop_loss_points }}"></label>
 <label>Target points<input type="number" name="target_points" min="0.05" step="0.05" value="{{ s.target_points }}"></label>
 <label>Quantity<input type="number" name="lot_size" min="1" value="{{ s.lot_size }}"></label>
-<label>Entry offset points<input type="number" name="entry_offset_points" min="0" step="0.05" value="{{ s.entry_offset_points }}"></label>
 <label>Live trading<select name="trading_enabled"><option value="0" {{ 'selected' if not s.trading_enabled else '' }}>Disabled</option><option value="1" {{ 'selected' if s.trading_enabled else '' }}>Enabled</option></select></label>
-<button type="submit">Save settings</button></form><p><small>After changing CCI length, recreate the TradingView alert with the same value.</small></p></div>
+<button type="submit">Save settings</button></form><p><small>Contract delta is estimated from the TradingView spot price and configured ESTIMATED_IV, so the free Kite Personal API is sufficient. After changing CCI length, recreate the TradingView alert with the same value.</small></p></div>
 <div class="card"><h2>Recent signals</h2><ul>{% for x in signals %}<li>{{ x.created_at }} — {{ x.side }} — {{ x.status }}{% if x.error %}: {{ x.error }}{% endif %}</li>{% else %}<li>No signals yet</li>{% endfor %}</ul></div>
 <div class="card"><h2>Recent trades</h2><ul>{% for x in trades %}<li>{{ x.created_at }} — {{ x.symbol }} — {{ x.status }}{% if x.error %}: {{ x.error }}{% endif %}</li>{% else %}<li>No trades yet</li>{% endfor %}</ul></div>
 </body></html>
@@ -629,9 +594,8 @@ def admin():
             settings.stop_loss_points = float(request.form["stop_loss_points"])
             settings.target_points = float(request.form["target_points"])
             settings.lot_size = int(request.form["lot_size"])
-            settings.entry_offset_points = float(request.form["entry_offset_points"])
             settings.trading_enabled = int(request.form["trading_enabled"])
-            if not (2 <= settings.cci_length <= 500 and 0.01 <= settings.min_delta <= 0.99 and settings.stop_loss_points > 0 and settings.target_points > 0 and settings.lot_size > 0 and settings.entry_offset_points >= 0):
+            if not (2 <= settings.cci_length <= 500 and 0.01 <= settings.min_delta <= 0.99 and settings.stop_loss_points > 0 and settings.target_points > 0 and settings.lot_size > 0):
                 return "Invalid settings", 400
             settings.updated_at = utcnow()
             db.commit()
@@ -734,5 +698,6 @@ start_worker_once()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+
 
 

@@ -37,6 +37,7 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 
 - `GET /health` reports service, trading-switch, and daily Kite-login status without exposing secrets.
 - The root control panel uses HTTP Basic authentication.
+- Kite app credentials can be replaced from the control panel and are saved with service-only permissions on the Droplet, so routine changes do not require Termius.
 - Webhooks require the shared secret in the JSON body and are deduplicated by signal, bar close, and CCI length.
 - Railway signs every forwarded request; the executor rejects unsigned direct requests.
 - Signals are ignored while another signal or position is active and expire after five minutes.

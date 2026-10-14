@@ -15,7 +15,7 @@ Drojun receives confirmed one-hour CCI zone-entry alerts from TradingView and ma
 - No new entries after `15:15` IST
 - Same-day expiry is skipped
 
-The CCI length, delta, stop, target, quantity, entry offset, and live-trading switch are editable on the password-protected control panel.
+The CCI length, delta, stop, target, quantity, and live-trading switch are editable on the password-protected control panel.
 
 ## Affordable deployment
 
@@ -25,7 +25,7 @@ Railway remains the public HTTPS gateway. The existing DigitalOcean Droplet is t
 2. Clone the repository once on the Droplet and run `sudo ./deploy/bootstrap.sh IP_ADDRESS.sslip.io`.
 3. Edit `/etc/drojun.env`, replace every `CHANGE_ME`, and copy its generated `GATEWAY_SHARED_SECRET`. Restart with `sudo systemctl restart drojun`.
 4. On Railway, set `APP_ROLE=gateway`, `EXECUTOR_BASE_URL=https://IP_ADDRESS.sslip.io`, and the same `GATEWAY_SHARED_SECRET`.
-5. Keep the Kite redirect URL pointed at `https://YOUR_RAILWAY_DOMAIN/kite/callback`.
+5. Create a free **Personal** Kite app and point its redirect URL at `https://YOUR_RAILWAY_DOMAIN/kite/callback`. Drojun does not need the paid historical data or live quote subscription.
 6. In GitHub Actions secrets, add `DEPLOY_HOST`, `DEPLOY_USER`, and `DEPLOY_SSH_KEY`. The deploy user needs permission to run `/usr/local/sbin/drojun-deploy` with sudo.
 7. Open the Railway URL and complete Zerodha login each trading day.
 8. Add `tradingview/Drojun_CCI.pine` to the one-hour NIFTY chart, set the same webhook secret, and create an alert using **Any alert() function call** with webhook URL `https://YOUR_RAILWAY_DOMAIN/webhook`.
@@ -41,7 +41,8 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 - Railway signs every forwarded request; the executor rejects unsigned direct requests.
 - Signals are ignored while another signal or position is active and expire after five minutes.
 - Settings, signals, token state, and broker trigger IDs persist in SQLite on the Droplet.
-- Entry orders that remain unfilled for 30 seconds are cancelled.
+- Contract delta is estimated from the TradingView spot price with `ESTIMATED_IV` (default `0.18`), avoiding the paid live quote API. The minimum delta remains editable on the control panel.
+- Entry orders are placed at market and the actual fill price is used for the stop and target.
 - Stop and target use Kite's native two-leg GTT OCO trigger, so the protection persists overnight and Kite cancels the unused leg.
 
 Kite access tokens expire the next morning. The service remains online continuously, but Zerodha login must still be completed each trading day.

@@ -577,6 +577,59 @@ def record_paper_trade(db, signal: Signal, settings: StrategySettings) -> None:
     db.commit()
 
 
+def record_safe_test_trade(side: str, spot: float, bar_time: str, cci_length: int, settings: StrategySettings) -> dict:
+    raw_key = f"TEST|{side}|{bar_time}|{cci_length}"
+    with SessionLocal() as db:
+        signal = Signal(
+            dedupe_key=hashlib.sha256(raw_key.encode()).hexdigest(),
+            side=side,
+            spot=spot,
+            bar_time=bar_time,
+            cci_length=cci_length,
+            status="TESTING",
+        )
+        db.add(signal)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            return {"status": "duplicate_ignored", "live_order_submitted": False}
+        try:
+            record_paper_trade(db, signal, settings)
+            paper_trade = db.scalar(select(PaperTrade).where(PaperTrade.signal_id == signal.id))
+            if paper_trade is None:
+                raise RuntimeError("The test paper trade was not created")
+            completed_at = utcnow()
+            paper_trade.status = "TESTED"
+            paper_trade.exit_spot = paper_trade.entry_spot
+            paper_trade.exit_price = paper_trade.entry_price
+            paper_trade.last_spot = paper_trade.entry_spot
+            paper_trade.last_price = paper_trade.entry_price
+            paper_trade.closed_at = completed_at
+            paper_trade.updated_at = completed_at
+            signal.status = "TEST_COMPLETE"
+            signal.error = "Safe test only; no broker order was submitted"
+            signal.updated_at = completed_at
+            db.commit()
+            return {
+                "status": "test_complete",
+                "signal_id": signal.id,
+                "paper_trade_id": paper_trade.id,
+                "symbol": paper_trade.symbol,
+                "entry_price": paper_trade.entry_price,
+                "live_order_submitted": False,
+            }
+        except Exception as exc:
+            db.rollback()
+            failed_signal = db.get(Signal, signal.id)
+            if failed_signal is not None:
+                failed_signal.status = "TEST_FAILED"
+                failed_signal.error = str(exc)[:500]
+                failed_signal.updated_at = utcnow()
+                db.commit()
+            raise
+
+
 def claim_signal() -> int | None:
     with SessionLocal.begin() as db:
         settings = db.get(StrategySettings, 1)
@@ -1017,6 +1070,7 @@ def webhook():
         return jsonify(error="price, cci_length and bar_time are required"), 400
     if side not in {"CALL", "PUT", "NONE"} or spot <= 0 or not bar_time:
         return jsonify(error="invalid signal payload"), 400
+    is_test = data.get("test") is True
     with SessionLocal() as db:
         settings = db.get(StrategySettings, 1)
         execution_mode = int(settings.trading_enabled)
@@ -1025,6 +1079,14 @@ def webhook():
         return jsonify(error="execution is disabled"), 409
     if cci_length != expected_cci_length:
         return jsonify(error=f"CCI length mismatch; expected {expected_cci_length}"), 409
+    if is_test:
+        if side not in {"CALL", "PUT"}:
+            return jsonify(error="test signals must use CALL or PUT"), 400
+        try:
+            result = record_safe_test_trade(side, spot, bar_time, cci_length, settings)
+        except Exception as exc:
+            return jsonify(error=f"safe test failed: {str(exc)[:500]}", live_order_submitted=False), 500
+        return jsonify(execution_mode=execution_mode_name(execution_mode), **result), 200
     paper_mark = mark_paper_journal(spot, bar_time) if paper_enabled(execution_mode) else {}
     if side == "NONE":
         return jsonify(status="bar_recorded", execution_mode=execution_mode_name(execution_mode), **paper_mark), 200

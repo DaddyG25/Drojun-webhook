@@ -937,7 +937,6 @@ ADMIN_PAGE = """
 <title>Drojun control panel</title><style>
 body{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;color:#18212f}form{display:grid;grid-template-columns:1fr 1fr;gap:14px}label{display:grid;gap:5px}input,select,button{font:inherit;padding:9px}button{grid-column:1/-1}.card{padding:20px;border:1px solid #ccd3dc;border-radius:12px;margin:18px 0}.ok{color:#087830}.bad{color:#b42318}small{color:#56606f}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;padding:8px;border-bottom:1px solid #e4e7ec;white-space:nowrap}.scroll{overflow:auto}</style></head><body>
 <h1>Drojun</h1><div class="card"><b>Kite session:</b> <span class="{{ 'ok' if token_current else 'bad' }}">{{ 'ready' if token_current else 'login required' }}</span><br><br><a href="/kite/login">Log in to Zerodha</a></div>
-<div class="card"><h2>Admin login</h2><p>Current username: <code>{{ admin_username }}</code></p><form method="post" action="/admin/credentials"><input type="hidden" name="csrf" value="{{ csrf }}"><label>New username<input name="username" minlength="3" maxlength="64" pattern="[A-Za-z0-9_.@-]+" autocomplete="username" required></label><label>New password<input type="password" name="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><label>Confirm password<input type="password" name="password_confirmation" minlength="12" maxlength="256" autocomplete="new-password" required></label><button type="submit">Change admin login</button></form><p><small>Use at least 12 characters. After saving, your browser will ask you to sign in again with the new credentials.</small></p></div>
 <div class="card"><h2>Kite app credentials</h2><p>Current API key: <code>{{ kite_key or 'not configured' }}</code></p><form method="post" action="/kite/credentials"><input type="hidden" name="csrf" value="{{ csrf }}"><label>API key<input name="api_key" minlength="16" maxlength="16" required></label><label>API secret<input type="password" name="api_secret" minlength="32" maxlength="32" required></label><button type="submit">Save Kite credentials</button></form></div>
 <div class="card"><h2>Strategy settings</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label>CCI length<input type="number" name="cci_length" min="2" max="500" value="{{ s.cci_length }}"></label>
@@ -979,35 +978,8 @@ def admin():
         recent = list(db.scalars(select(Signal).order_by(Signal.id.desc()).limit(10)))
         recent_trades = list(db.scalars(select(Trade).order_by(Trade.id.desc()).limit(10)))
         paper_journal = list(db.scalars(select(PaperTrade).order_by(PaperTrade.id.desc()).limit(100)))
-        credentials = db.get(AdminCredentials, 1)
         kite_key, _ = kite_credentials()
-        return render_template_string(ADMIN_PAGE, s=settings, signals=recent, trades=recent_trades, paper_journal=paper_journal, format_ist=format_ist, paper_pnl=paper_pnl, csrf=csrf, token_current=bool(state and token_is_current(state.token_issued_at)), kite_key=kite_key, admin_username=credentials.username if credentials else os.getenv("ADMIN_USERNAME", "admin"))
-
-
-@app.post("/admin/credentials")
-@admin_required
-def update_admin_credentials():
-    if not secure_equal(request.form.get("csrf"), session.get("csrf")):
-        return "Invalid form token", 400
-    username = request.form.get("username", "").strip()
-    password = request.form.get("password", "")
-    password_confirmation = request.form.get("password_confirmation", "")
-    if not re.fullmatch(r"[A-Za-z0-9_.@-]{3,64}", username):
-        return "Username must be 3-64 characters and use only letters, numbers, dot, underscore, @, or hyphen", 400
-    if not 12 <= len(password) <= 256:
-        return "Password must be 12-256 characters", 400
-    if password != password_confirmation:
-        return "Passwords do not match", 400
-    with SessionLocal.begin() as db:
-        credentials = db.get(AdminCredentials, 1)
-        if credentials is None:
-            credentials = AdminCredentials(id=1, username=username, password_hash=generate_password_hash(password))
-            db.add(credentials)
-        else:
-            credentials.username = username
-            credentials.password_hash = generate_password_hash(password)
-            credentials.updated_at = utcnow()
-    return render_template_string("""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Drojun login updated</title></head><body style="font:16px system-ui;max-width:720px;margin:60px auto;padding:0 20px"><h1>Admin login updated</h1><p>Your new username and password are active. Open the control panel again and sign in with them.</p><p><a href="/">Return to Drojun</a></p></body></html>""")
+        return render_template_string(ADMIN_PAGE, s=settings, signals=recent, trades=recent_trades, paper_journal=paper_journal, format_ist=format_ist, paper_pnl=paper_pnl, csrf=csrf, token_current=bool(state and token_is_current(state.token_issued_at)), kite_key=kite_key)
 
 
 @app.post("/kite/credentials")

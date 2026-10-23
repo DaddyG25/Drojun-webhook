@@ -271,6 +271,12 @@ def token_is_current(issued_at: dt.datetime | None) -> bool:
     return issued <= now < expiry
 
 
+def live_login_required(execution_mode: int, state: RuntimeState | None) -> bool:
+    return live_enabled(execution_mode) and not bool(
+        state and state.access_token and token_is_current(state.token_issued_at)
+    )
+
+
 _kite_credentials_lock = threading.Lock()
 
 
@@ -672,6 +678,7 @@ def process_signal(signal_id: int) -> None:
             signal.error = "Signal arrived outside the 09:15-15:15 IST entry window"
             db.commit()
             return
+        state = db.get(RuntimeState, 1)
         if paper_enabled(execution_mode):
             record_paper_trade(db, signal, settings)
         if execution_mode == EXECUTION_PAPER:
@@ -679,6 +686,16 @@ def process_signal(signal_id: int) -> None:
         if not live_enabled(execution_mode):
             signal.status = "REJECTED"
             signal.error = "Unknown execution mode"
+            db.commit()
+            return
+        if live_login_required(execution_mode, state):
+            signal.status = "LIVE_LOGIN_REQUIRED"
+            signal.error = (
+                "Paper trade recorded; live order skipped because Zerodha login is required for today"
+                if paper_enabled(execution_mode)
+                else "Live order skipped because Zerodha login is required for today"
+            )
+            signal.updated_at = utcnow()
             db.commit()
             return
         kite = kite_client()
@@ -849,12 +866,19 @@ def health():
         state = db.get(RuntimeState, 1)
         settings = db.get(StrategySettings, 1)
         execution_mode = int(settings.trading_enabled) if settings else EXECUTION_DISABLED
+        kite_current = bool(state and state.access_token and token_is_current(state.token_issued_at))
+        login_required = live_login_required(execution_mode, state)
         return jsonify(
-            status="ok",
+            status="action_required" if login_required else "ok",
             execution_mode=execution_mode_name(execution_mode),
             paper_trading_enabled=paper_enabled(execution_mode),
             trading_enabled=live_enabled(execution_mode),
-            kite_login_current=bool(state and token_is_current(state.token_issued_at)),
+            kite_login_current=kite_current,
+            live_trading_ready=not login_required,
+            action_required=(
+                "Log in to Zerodha for the current trading day before live orders can be submitted"
+                if login_required else None
+            ),
         )
 
 
@@ -935,8 +959,8 @@ def paper_journal_csv():
 ADMIN_PAGE = """
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Drojun control panel</title><style>
-body{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;color:#18212f}form{display:grid;grid-template-columns:1fr 1fr;gap:14px}label{display:grid;gap:5px}input,select,button{font:inherit;padding:9px}button{grid-column:1/-1}.card{padding:20px;border:1px solid #ccd3dc;border-radius:12px;margin:18px 0}.ok{color:#087830}.bad{color:#b42318}small{color:#56606f}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;padding:8px;border-bottom:1px solid #e4e7ec;white-space:nowrap}.scroll{overflow:auto}</style></head><body>
-<h1>Drojun</h1><div class="card"><b>Kite session:</b> <span class="{{ 'ok' if token_current else 'bad' }}">{{ 'ready' if token_current else 'login required' }}</span><br><br><a href="/kite/login">Log in to Zerodha</a></div>
+body{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;color:#18212f}form{display:grid;grid-template-columns:1fr 1fr;gap:14px}label{display:grid;gap:5px}input,select,button{font:inherit;padding:9px}button{grid-column:1/-1}.card{padding:20px;border:1px solid #ccd3dc;border-radius:12px;margin:18px 0}.login-warning{border:2px solid #b42318;background:#fff4f2}.ok{color:#087830}.bad{color:#b42318}small{color:#56606f}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;padding:8px;border-bottom:1px solid #e4e7ec;white-space:nowrap}.scroll{overflow:auto}</style></head><body>
+<h1>Drojun</h1><div class="card{% if live_mode and not token_current %} login-warning{% endif %}"><b>Kite session:</b> <span class="{{ 'ok' if token_current else 'bad' }}">{{ 'ready for live trading' if token_current else 'login required today' }}</span>{% if live_mode and not token_current %}<p class="bad"><b>Live orders cannot be submitted until you complete today's Zerodha login.</b> Paper signals will still be recorded in combined mode.</p>{% endif %}<br><a href="/kite/login">Log in to Zerodha</a></div>
 <div class="card"><h2>Kite app credentials</h2><p>Current API key: <code>{{ kite_key or 'not configured' }}</code></p><form method="post" action="/kite/credentials"><input type="hidden" name="csrf" value="{{ csrf }}"><label>API key<input name="api_key" minlength="16" maxlength="16" required></label><label>API secret<input type="password" name="api_secret" minlength="32" maxlength="32" required></label><button type="submit">Save Kite credentials</button></form></div>
 <div class="card"><h2>Strategy settings</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label>CCI length<input type="number" name="cci_length" min="2" max="500" value="{{ s.cci_length }}"></label>
@@ -979,7 +1003,8 @@ def admin():
         recent_trades = list(db.scalars(select(Trade).order_by(Trade.id.desc()).limit(10)))
         paper_journal = list(db.scalars(select(PaperTrade).order_by(PaperTrade.id.desc()).limit(100)))
         kite_key, _ = kite_credentials()
-        return render_template_string(ADMIN_PAGE, s=settings, signals=recent, trades=recent_trades, paper_journal=paper_journal, format_ist=format_ist, paper_pnl=paper_pnl, csrf=csrf, token_current=bool(state and token_is_current(state.token_issued_at)), kite_key=kite_key)
+        execution_mode = int(settings.trading_enabled)
+        return render_template_string(ADMIN_PAGE, s=settings, signals=recent, trades=recent_trades, paper_journal=paper_journal, format_ist=format_ist, paper_pnl=paper_pnl, csrf=csrf, token_current=bool(state and state.access_token and token_is_current(state.token_issued_at)), live_mode=live_enabled(execution_mode), kite_key=kite_key)
 
 
 @app.post("/kite/credentials")
@@ -1045,8 +1070,10 @@ def webhook():
     is_test = data.get("test") is True
     with SessionLocal() as db:
         settings = db.get(StrategySettings, 1)
+        state = db.get(RuntimeState, 1)
         execution_mode = int(settings.trading_enabled)
         expected_cci_length = settings.cci_length
+        live_ready = not live_login_required(execution_mode, state)
     if execution_mode == EXECUTION_DISABLED:
         return jsonify(error="execution is disabled"), 409
     if cci_length != expected_cci_length:
@@ -1084,7 +1111,14 @@ def webhook():
         except IntegrityError:
             db.rollback()
             return jsonify(status="duplicate_ignored"), 200
-        return jsonify(status="queued", signal_id=row.id, execution_mode=execution_mode_name(execution_mode), **paper_mark), 202
+        return jsonify(
+            status="queued",
+            signal_id=row.id,
+            execution_mode=execution_mode_name(execution_mode),
+            live_trading_ready=live_ready,
+            warning=(None if live_ready else "Zerodha login is required today; paper will continue but the live order will be skipped"),
+            **paper_mark,
+        ), 202
 
 
 _worker_started = False

@@ -35,7 +35,7 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 
 ## Operations
 
-- `GET /health` reports service, execution-mode, and daily Kite-login status without exposing secrets.
+- `GET /health` reports service, execution-mode, daily Kite-login status, and `live_trading_ready` without exposing secrets. When live mode is enabled without today's Kite session, it reports `status: action_required` while keeping HTTP 200 for infrastructure health checks.
 - `GET /broker/status` provides an authenticated view of nonzero positions, open orders, and active GTT triggers for preflight checks.
 - `GET /journal.csv` downloads the authenticated paper-trade journal.
 - The root control panel uses HTTP Basic authentication.
@@ -46,7 +46,7 @@ TradingView copies the script and inputs into an alert. After changing CCI lengt
 - Signals are ignored while another signal or position is active and expire after five minutes.
 - Settings, signals, token state, and broker trigger IDs persist in SQLite on the Droplet.
 - Contract delta is estimated from the TradingView spot price with `ESTIMATED_IV` (default `0.18`), avoiding the paid live quote API. The minimum delta remains editable on the control panel.
-- Paper mode never submits broker orders. It records the selected contract, estimated entry premium, stop, target, and quantity in the journal. Hourly TradingView bar updates mark open paper trades using the same Black-Scholes estimate and record stop, target, expiry, and estimated P&L outcomes. Combined paper-and-live mode keeps the same journal while also using the real broker order path.
+- Paper mode never submits broker orders. It records the selected contract, estimated entry premium, stop, target, and quantity in the journal. Hourly TradingView bar updates mark open paper trades using the same Black-Scholes estimate and record stop, target, expiry, and estimated P&L outcomes. Combined paper-and-live mode keeps the same journal while also using the real broker order path. If today's Zerodha login is missing, the paper entry is still recorded and the signal is labelled `LIVE_LOGIN_REQUIRED` instead of failing silently.
 - Entry orders are placed at market and the actual fill price is used for the stop and target.
 - Stop and target use Kite's native two-leg GTT OCO trigger, so the protection persists overnight and Kite cancels the unused leg.
 

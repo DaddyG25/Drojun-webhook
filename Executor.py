@@ -860,6 +860,28 @@ def worker_loop() -> None:
         time.sleep(2)
 
 
+def public_error_code(message: str | None) -> str | None:
+    """Return a non-sensitive category suitable for the public health endpoint."""
+    if not message:
+        return None
+    normalized = message.lower()
+    categories = (
+        (("incorrect api_key", "access_token", "token is invalid", "session expired", "login is required"), "kite_authentication"),
+        (("static ip", "ip address", "ip mismatch"), "static_ip_restriction"),
+        (("permission", "not enabled", "not allowed"), "kite_permission"),
+        (("margin", "insufficient fund", "insufficient balance"), "insufficient_margin"),
+        (("another signal", "already in progress"), "blocked_by_existing_state"),
+        (("older than",), "stale_signal"),
+        (("outside the", "outside trading"), "outside_entry_window"),
+        (("no eligible", "option expiry", "option contracts"), "contract_selection"),
+        (("rejected",), "broker_rejected"),
+    )
+    for needles, code in categories:
+        if any(needle in normalized for needle in needles):
+            return code
+    return "unknown_live_error"
+
+
 @app.get("/health")
 def health():
     with SessionLocal() as db:
@@ -868,6 +890,22 @@ def health():
         execution_mode = int(settings.trading_enabled) if settings else EXECUTION_DISABLED
         kite_current = bool(state and state.access_token and token_is_current(state.token_issued_at))
         login_required = live_login_required(execution_mode, state)
+        latest_live_signal = db.scalar(
+            select(Signal)
+            .where(Signal.status.not_like("TEST%"))
+            .order_by(Signal.id.desc())
+            .limit(1)
+        )
+        latest_live_trade = db.scalar(select(Trade).order_by(Trade.id.desc()).limit(1))
+        blocking_live_trade = db.scalar(
+            select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1)
+        )
+        blocking_signal = db.scalar(
+            select(Signal.id).where(Signal.status.in_(BLOCKING_SIGNAL_STATUSES)).limit(1)
+        )
+        open_paper_trade = db.scalar(
+            select(PaperTrade.id).where(PaperTrade.status.in_(OPEN_PAPER_STATUSES)).limit(1)
+        )
         return jsonify(
             status="action_required" if login_required else "ok",
             execution_mode=execution_mode_name(execution_mode),
@@ -879,6 +917,17 @@ def health():
                 "Log in to Zerodha for the current trading day before live orders can be submitted"
                 if login_required else None
             ),
+            latest_live_signal_status=(latest_live_signal.status if latest_live_signal else None),
+            latest_live_signal_error_code=public_error_code(
+                latest_live_signal.error if latest_live_signal else None
+            ),
+            latest_live_trade_status=(latest_live_trade.status if latest_live_trade else None),
+            latest_live_trade_error_code=public_error_code(
+                latest_live_trade.error if latest_live_trade else None
+            ),
+            blocking_live_trade=blocking_live_trade is not None,
+            blocking_signal=blocking_signal is not None,
+            open_paper_trade=open_paper_trade is not None,
         )
 
 

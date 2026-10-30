@@ -882,6 +882,21 @@ def public_error_code(message: str | None) -> str | None:
     return "unknown_live_error"
 
 
+def public_trade_failure_stage(trade: Trade | None) -> str | None:
+    """Describe how far a live trade progressed without exposing order details."""
+    if trade is None or not trade.error:
+        return None
+    if not trade.entry_order_id:
+        return "entry_submission"
+    if trade.entry_price is None:
+        return "entry_fill_or_validation"
+    if not trade.gtt_trigger_id and not trade.stop_order_id:
+        return "protection_submission"
+    if trade.stop_order_id and not trade.gtt_trigger_id:
+        return "emergency_stop_active"
+    return "protection_monitoring"
+
+
 @app.get("/health")
 def health():
     with SessionLocal() as db:
@@ -925,6 +940,7 @@ def health():
             latest_live_trade_error_code=public_error_code(
                 latest_live_trade.error if latest_live_trade else None
             ),
+            latest_live_trade_failure_stage=public_trade_failure_stage(latest_live_trade),
             blocking_live_trade=blocking_live_trade is not None,
             blocking_signal=blocking_signal is not None,
             open_paper_trade=open_paper_trade is not None,

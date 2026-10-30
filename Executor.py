@@ -184,10 +184,8 @@ def bootstrap_database() -> None:
         for row in db.scalars(select(Trade).where(Trade.status == "ENTRY_PENDING")):
             row.status = "NEEDS_REVIEW"
             row.error = "Service restarted while the entry was pending; verify the broker order book."
-        for row in db.scalars(
-            select(Trade).where(Trade.status == "NEEDS_REVIEW", Trade.entry_order_id.is_(None))
-        ):
-            if "permission" in (row.error or "").lower():
+        for row in db.scalars(select(Trade).where(Trade.status == "NEEDS_REVIEW")):
+            if not row.entry_order_id and "permission" in (row.error or "").lower():
                 row.status = "ENTRY_FAILED"
 
 

@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, session
 from kiteconnect import KiteConnect
+from kiteconnect.exceptions import InputException, OrderException, PermissionException, TokenException
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
@@ -29,6 +30,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 BLOCKING_TRADE_STATUSES = ("ENTRY_PENDING", "ACTIVE", "NEEDS_REVIEW")
 BLOCKING_SIGNAL_STATUSES = ("QUEUED", "PROCESSING", "NEEDS_REVIEW")
 OPEN_PAPER_STATUSES = ("OPEN",)
+DEFINITIVE_ENTRY_REJECTION_TYPES = (InputException, OrderException, PermissionException, TokenException)
 EXECUTION_DISABLED = 0
 EXECUTION_LIVE = 1
 EXECUTION_PAPER = 2
@@ -182,6 +184,11 @@ def bootstrap_database() -> None:
         for row in db.scalars(select(Trade).where(Trade.status == "ENTRY_PENDING")):
             row.status = "NEEDS_REVIEW"
             row.error = "Service restarted while the entry was pending; verify the broker order book."
+        for row in db.scalars(
+            select(Trade).where(Trade.status == "NEEDS_REVIEW", Trade.entry_order_id.is_(None))
+        ):
+            if "permission" in (row.error or "").lower():
+                row.status = "ENTRY_FAILED"
 
 
 bootstrap_database()
@@ -756,8 +763,8 @@ def process_signal(signal_id: int) -> None:
         db.commit()
 
 
-def mark_signal_error(signal_id: int, message: str) -> None:
-    safe_message = message[:1000]
+def mark_signal_error(signal_id: int, error: Exception) -> None:
+    safe_message = str(error)[:1000]
     LOG.exception("Signal %s failed: %s", signal_id, safe_message)
     with SessionLocal.begin() as db:
         signal = db.get(Signal, signal_id)
@@ -767,7 +774,11 @@ def mark_signal_error(signal_id: int, message: str) -> None:
             signal.updated_at = utcnow()
         trade = db.scalar(select(Trade).where(Trade.signal_id == signal_id))
         if trade and trade.status == "ENTRY_PENDING":
-            trade.status = "NEEDS_REVIEW"
+            trade.status = (
+                "ENTRY_FAILED"
+                if trade.entry_order_id is None and isinstance(error, DEFINITIVE_ENTRY_REJECTION_TYPES)
+                else "NEEDS_REVIEW"
+            )
             trade.error = safe_message
             trade.updated_at = utcnow()
 
@@ -854,7 +865,7 @@ def worker_loop() -> None:
                 try:
                     process_signal(signal_id)
                 except Exception as exc:
-                    mark_signal_error(signal_id, str(exc))
+                    mark_signal_error(signal_id, exc)
         except Exception as exc:
             LOG.error("Worker cycle failed: %s", exc)
         time.sleep(2)
@@ -912,6 +923,13 @@ def health():
             .limit(1)
         )
         latest_live_trade = db.scalar(select(Trade).order_by(Trade.id.desc()).limit(1))
+        latest_trade_error_code = public_error_code(latest_live_trade.error if latest_live_trade else None)
+        kite_permission_required = bool(
+            live_enabled(execution_mode)
+            and latest_live_trade
+            and latest_live_trade.status in {"ENTRY_FAILED", "NEEDS_REVIEW"}
+            and latest_trade_error_code in {"kite_permission", "static_ip_restriction"}
+        )
         blocking_live_trade = db.scalar(
             select(Trade.id).where(Trade.status.in_(BLOCKING_TRADE_STATUSES)).limit(1)
         )
@@ -922,24 +940,26 @@ def health():
             select(PaperTrade.id).where(PaperTrade.status.in_(OPEN_PAPER_STATUSES)).limit(1)
         )
         return jsonify(
-            status="action_required" if login_required else "ok",
+            status="action_required" if login_required or kite_permission_required else "ok",
             execution_mode=execution_mode_name(execution_mode),
             paper_trading_enabled=paper_enabled(execution_mode),
             trading_enabled=live_enabled(execution_mode),
             kite_login_current=kite_current,
-            live_trading_ready=not login_required,
+            live_trading_ready=not login_required and not kite_permission_required,
             action_required=(
                 "Log in to Zerodha for the current trading day before live orders can be submitted"
-                if login_required else None
+                if login_required
+                else (
+                    "Kite rejected entry-order permission; verify the Personal API app is active and its registered static IP matches the executor, then log in to Zerodha again"
+                    if kite_permission_required else None
+                )
             ),
             latest_live_signal_status=(latest_live_signal.status if latest_live_signal else None),
             latest_live_signal_error_code=public_error_code(
                 latest_live_signal.error if latest_live_signal else None
             ),
             latest_live_trade_status=(latest_live_trade.status if latest_live_trade else None),
-            latest_live_trade_error_code=public_error_code(
-                latest_live_trade.error if latest_live_trade else None
-            ),
+            latest_live_trade_error_code=latest_trade_error_code,
             latest_live_trade_failure_stage=public_trade_failure_stage(latest_live_trade),
             blocking_live_trade=blocking_live_trade is not None,
             blocking_signal=blocking_signal is not None,
